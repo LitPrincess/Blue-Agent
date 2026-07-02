@@ -1,0 +1,17 @@
+{
+  "name": "travel-director-agent",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev:api",
+    "dev:api": "py -3.13 -m uvicorn app.main:app --reload --app-dir apps/api --host 0.0.0.0 --port 8000",
+    "dev:mobile": "npm --prefix apps/mobile run start",
+    "lint:api": "py -3.13 -m compileall apps/api/app",
+    "lint:mobile": "npm --prefix apps/mobile run typecheck"
+  },
+  "workspaces": [
+    "apps/mobile"
+  ],
+  "dependencies": {
+    "expo-audio": "~57.0.0"
+  }
+}

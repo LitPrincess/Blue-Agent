@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Travel Director Agent",
+    "slug": "travel-director-agent",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "用于语音输入您的出行需求"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#EAF3FF"
+      },
+      "permissions": ["RECORD_AUDIO"]
+    },
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "用于语音输入您的出行需求"
+        }
+      ]
+    ],
+    "extra": {
+      "apiBaseUrl": "http://localhost:8000"
+    }
+  }
+}
