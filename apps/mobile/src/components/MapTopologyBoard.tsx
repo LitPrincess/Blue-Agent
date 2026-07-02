@@ -95,7 +95,7 @@ export function MapTopologyBoard({
       >
         <WebView
           ref={webRef}
-          key={`${itinerary.id}-${itinerary.version}`}
+          key={`map-${itinerary.id}`}
           originWhitelist={["*"]}
           source={{ html }}
           style={styles.map}
@@ -129,9 +129,10 @@ export function MapTopologyBoard({
       </View>
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-        {items.map((item) => (
+        {items.map((item, index) => (
           <Pressable key={item.id} style={styles.nodeChip} onPress={() => onEditItem(item)}>
-            <Text style={styles.nodeChipTime}>{item.start_time}</Text>
+            <Text style={styles.nodeChipIndex}>#{index + 1}</Text>
+            <Text style={styles.nodeChipTime}>{item.start_time}-{item.end_time}</Text>
             <Text style={styles.nodeChipTitle} numberOfLines={1}>
               {item.title}
             </Text>
@@ -199,7 +200,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#D7E8FF",
   },
-  nodeChipTime: { color: "#7F93B1", fontSize: 9, fontWeight: "900" },
+  nodeChipIndex: { color: "#287CFF", fontSize: 9, fontWeight: "900" },
+  nodeChipTime: { marginTop: 2, color: "#7F93B1", fontSize: 9, fontWeight: "900" },
   nodeChipTitle: { marginTop: 4, color: "#30496F", fontSize: 11, fontWeight: "900" },
   tip: { color: "#8BA0BD", fontSize: 10, lineHeight: 15 },
 });

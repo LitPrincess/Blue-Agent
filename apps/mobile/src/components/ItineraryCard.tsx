@@ -1,6 +1,7 @@
 import { Pressable, View, Text, StyleSheet } from "react-native";
 
 import { ItineraryItem } from "../types";
+import { formatDurationLabel, formatTimeRange } from "../utils/durationUtils";
 import { nodeVisual, resolveNodeType } from "../utils/nodeUtils";
 
 const categoryLabel: Record<ItineraryItem["category"], string> = {
@@ -13,7 +14,15 @@ const categoryLabel: Record<ItineraryItem["category"], string> = {
   alert: "提醒",
 };
 
-export function ItineraryCard({ item, onEdit }: { item: ItineraryItem; onEdit?: (item: ItineraryItem) => void }) {
+export function ItineraryCard({
+  item,
+  index,
+  onEdit,
+}: {
+  item: ItineraryItem;
+  index: number;
+  onEdit?: (item: ItineraryItem) => void;
+}) {
   const kind = resolveNodeType(item);
   const visual = nodeVisual[kind] ?? nodeVisual.soft_task;
 
@@ -29,7 +38,8 @@ export function ItineraryCard({ item, onEdit }: { item: ItineraryItem; onEdit?: 
           <Text style={styles.badge}>{categoryLabel[item.category]}</Text>
         </View>
         <Text style={styles.nodeType}>
-          {visual.icon} {visual.label} · 可编辑
+          #{index + 1} {visual.icon} {visual.label} · {formatTimeRange(item.start_time, item.end_time)}
+          {formatDurationLabel(item.start_time, item.end_time) ? ` · ${formatDurationLabel(item.start_time, item.end_time)}` : ""}
         </Text>
         <Text style={styles.location}>{item.location}</Text>
         <Text style={styles.description}>{item.description}</Text>

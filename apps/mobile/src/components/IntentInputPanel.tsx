@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -12,11 +13,10 @@ import {
 } from "react-native";
 import {
   AudioModule,
-  RecordingPresets,
   setAudioModeAsync,
   useAudioRecorder,
 } from "expo-audio";
-import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
+import DateTimePicker, { DateTimePickerChangeEvent } from "@react-native-community/datetimepicker";
 
 import { parseIntent, transcribeVoice } from "../services/api";
 import {
@@ -26,9 +26,12 @@ import {
   mergeStructured,
   mergeStructuredFromApi,
   parseTravelFromText,
+  resolvePickerDate,
   StructuredFields,
   toIsoDate,
+  todayDate,
 } from "../utils/parseTravelInput";
+import { VOICE_RECORDING_OPTIONS } from "../utils/voiceRecording";
 
 export type InputMode = "voice" | "text" | "file";
 
@@ -65,7 +68,7 @@ export function IntentInputPanel({
   loading,
 }: Props) {
   const [mode, setMode] = useState<InputMode>("text");
-  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const audioRecorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
   const [listening, setListening] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [dateTarget, setDateTarget] = useState<"startDate" | "endDate" | null>(null);
@@ -156,11 +159,23 @@ export function IntentInputPanel({
     await startRecording();
   }
 
-  function onDateChange(event: DateTimePickerEvent, date?: Date) {
-    if (Platform.OS === "android") setDateTarget(null);
-    if (event.type === "dismissed" || !date || !dateTarget) return;
+  function onDateValueChange(_event: DateTimePickerChangeEvent, date: Date) {
+    if (!dateTarget) return;
     updateField(dateTarget, toIsoDate(date));
   }
+
+  function closeDatePicker() {
+    setDateTarget(null);
+  }
+
+  const pickerMinimumDate = todayDate();
+  const pickerMaximumDate = new Date(pickerMinimumDate.getFullYear() + 2, pickerMinimumDate.getMonth(), pickerMinimumDate.getDate());
+  const activePickerDate = dateTarget
+    ? resolvePickerDate(
+        structured[dateTarget],
+        dateTarget === "endDate" ? structured.startDate : undefined,
+      )
+    : todayDate();
 
   return (
     <View style={styles.wrap}>
@@ -303,12 +318,50 @@ export function IntentInputPanel({
       </View>
 
       {dateTarget ? (
-        <DateTimePicker
-          value={new Date(`${structured[dateTarget]}T00:00:00`)}
-          mode="date"
-          display={Platform.OS === "ios" ? "spinner" : "default"}
-          onChange={onDateChange}
-        />
+        Platform.OS === "android" ? (
+          <Modal transparent animationType="fade" visible onRequestClose={closeDatePicker}>
+            <View style={styles.dateModalBackdrop}>
+              <View style={styles.dateModalCard}>
+                <Text style={styles.dateModalTitle}>
+                  选择{dateTarget === "startDate" ? "出发" : "结束"}日期
+                </Text>
+                <DateTimePicker
+                  value={activePickerDate}
+                  mode="date"
+                  display="spinner"
+                  minimumDate={pickerMinimumDate}
+                  maximumDate={pickerMaximumDate}
+                  onValueChange={onDateValueChange}
+                  onDismiss={closeDatePicker}
+                />
+                <View style={styles.dateModalActions}>
+                  <Pressable style={styles.dateModalBtn} onPress={closeDatePicker}>
+                    <Text style={styles.dateModalBtnText}>完成</Text>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          </Modal>
+        ) : (
+          <View style={styles.iosPickerWrap}>
+            <View style={styles.iosPickerHead}>
+              <Text style={styles.dateModalTitle}>
+                选择{dateTarget === "startDate" ? "出发" : "结束"}日期
+              </Text>
+              <Pressable onPress={closeDatePicker}>
+                <Text style={styles.dateModalDone}>完成</Text>
+              </Pressable>
+            </View>
+            <DateTimePicker
+              value={activePickerDate}
+              mode="date"
+              display="spinner"
+              minimumDate={pickerMinimumDate}
+              maximumDate={pickerMaximumDate}
+              onValueChange={onDateValueChange}
+            />
+          </View>
+        )
       ) : null}
 
       <View style={styles.tagRow}>
@@ -512,6 +565,36 @@ const styles = StyleSheet.create({
   previewPill: { width: "48%", padding: 10, borderRadius: 12, backgroundColor: "#F7FBFF" },
   previewLabel: { color: "#287CFF", fontSize: 10, fontWeight: "900" },
   previewValue: { marginTop: 4, color: "#7085A2", fontSize: 11, lineHeight: 15 },
+  dateModalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(35,59,99,0.35)",
+    justifyContent: "center",
+    padding: 20,
+  },
+  dateModalCard: {
+    borderRadius: 20,
+    padding: 16,
+    backgroundColor: "#FFFFFF",
+  },
+  dateModalTitle: { color: "#233B63", fontSize: 15, fontWeight: "900", marginBottom: 8 },
+  dateModalActions: { flexDirection: "row", justifyContent: "flex-end", marginTop: 8 },
+  dateModalBtn: {
+    minWidth: 88,
+    minHeight: 40,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#1B63FF",
+  },
+  dateModalBtnText: { color: "#FFFFFF", fontSize: 13, fontWeight: "900" },
+  iosPickerWrap: {
+    marginTop: 8,
+    borderRadius: 18,
+    backgroundColor: "#FFFFFF",
+    padding: 12,
+  },
+  iosPickerHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  dateModalDone: { color: "#287CFF", fontSize: 13, fontWeight: "900" },
   cta: {
     minHeight: 50,
     borderRadius: 18,

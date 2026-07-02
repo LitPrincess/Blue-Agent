@@ -487,8 +487,8 @@ export function TravelDirectorScreen() {
                 onEditItem={handleEditNode}
                 onMapInteractionChange={handleMapInteraction}
               />
-              {itinerary.items.map((item) => (
-                <ItineraryCard key={item.id} item={item} onEdit={handleEditNode} />
+              {itinerary.items.map((item, index) => (
+                <ItineraryCard key={item.id} item={item} index={index} onEdit={handleEditNode} />
               ))}
               <NodeEditModal
                 visible={nodeEditDraft != null}

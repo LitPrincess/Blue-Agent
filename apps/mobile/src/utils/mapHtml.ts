@@ -1,24 +1,39 @@
 import { ItineraryItem } from "../types";
+import { formatDurationLabel, formatTimeRange } from "./durationUtils";
 import { resolveMapPoint } from "./geoCoords";
 import { resolveNodeType } from "./nodeUtils";
 
 export type MapMarkerPayload = {
   id: string;
+  index: number;
   lng: number;
   lat: number;
   icon: string;
   title: string;
-  time: string;
+  startTime: string;
+  endTime: string;
+  timeRange: string;
+  duration: string;
   location: string;
   nodeType: "hard_anchor" | "semi_anchor" | "soft_task";
   editable: boolean;
+  draggable: boolean;
 };
 
 const MAP_BOOT = `
   window.mapApi = {
     zoomIn: function() { if (window.__map) window.__map.zoomIn(); },
     zoomOut: function() { if (window.__map) window.__map.zoomOut(); },
-    fitView: function() { if (window.__map && window.__markerInstances) window.__map.setFitView(window.__markerInstances, false, [50, 50, 50, 50]); },
+    fitView: function() {
+      if (window.__map && window.__markerInstances && window.__markerInstances.length) {
+        window.__map.setFitView(window.__markerInstances, false, [50, 50, 50, 50]);
+      }
+    },
+  };
+  window.__fitMapOnce = function(map, markerInstances) {
+    if (window.__didInitialFit || !markerInstances.length) return;
+    map.setFitView(markerInstances, false, [50, 50, 50, 50]);
+    window.__didInitialFit = true;
   };
 `;
 
@@ -33,7 +48,7 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes" />
   <style>
     html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; background: #e8f4ff; touch-action: none; }
-    .cartoon-marker { display: flex; flex-direction: column; align-items: center; width: 72px; cursor: grab; }
+    .cartoon-marker { display: flex; flex-direction: column; align-items: center; width: 96px; cursor: grab; }
     .marker-bubble {
       width: 46px; height: 46px; border-radius: 18px;
       display: flex; align-items: center; justify-content: center;
@@ -44,12 +59,17 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
     .semi_anchor .marker-bubble { background: linear-gradient(135deg, #17bfd1, #0ea5b7); }
     .soft_task .marker-bubble { background: linear-gradient(135deg, #89b8ff, #5b95ff); animation: float 2.4s ease-in-out infinite; }
     .marker-stem { width: 4px; height: 12px; background: #287cff; border-radius: 999px; margin-top: -2px; }
+    .marker-index {
+      position: absolute; top: -8px; left: -8px; min-width: 18px; height: 18px; padding: 0 4px;
+      border-radius: 9px; background: #fff; color: #1b63ff; font-size: 10px; font-weight: 900;
+      display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    }
     .marker-title {
       margin-top: 4px; padding: 4px 6px; border-radius: 10px; background: rgba(255,255,255,0.94);
       color: #30496f; font-size: 10px; font-weight: 800; text-align: center; line-height: 1.2;
-      box-shadow: 0 4px 10px rgba(70,131,201,0.18); max-width: 72px;
+      box-shadow: 0 4px 10px rgba(70,131,201,0.18); max-width: 96px;
     }
-    .marker-time { color: #7f93b1; font-size: 9px; font-weight: 800; margin-top: 2px; }
+    .marker-time { color: #7f93b1; font-size: 9px; font-weight: 800; margin-top: 2px; text-align: center; }
     .badge {
       position: absolute; top: -6px; right: -6px; width: 16px; height: 16px; border-radius: 8px;
       background: #fff; color: #287cff; font-size: 9px; display: flex; align-items: center; justify-content: center;
@@ -94,42 +114,42 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
       path.push([item.lng, item.lat]);
       const typeBadge = item.nodeType === 'hard_anchor' ? '<div class="badge">硬</div>' :
         item.nodeType === 'semi_anchor' ? '<div class="badge">半</div>' : '';
+      const timeLabel = item.timeRange + (item.duration ? ' · ' + item.duration : '');
       const html = '<div class="cartoon-marker ' + item.nodeType + '">' +
-        '<div class="marker-bubble">' + item.icon + typeBadge + '</div>' +
+        '<div class="marker-bubble">' + item.icon + '<div class="marker-index">' + item.index + '</div>' + typeBadge + '</div>' +
         '<div class="marker-stem"></div>' +
         '<div class="marker-title">' + item.title + '</div>' +
-        '<div class="marker-time">' + item.time + '</div>' +
+        '<div class="marker-time">' + timeLabel + '</div>' +
         '</div>';
 
       const marker = new AMap.Marker({
         position: [item.lng, item.lat],
         content: html,
-        offset: new AMap.Pixel(-36, -72),
+        offset: new AMap.Pixel(-48, -84),
         zIndex: item.nodeType === 'hard_anchor' ? 120 : 100,
-        draggable: true,
-        cursor: 'move',
+        draggable: item.draggable,
+        cursor: item.draggable ? 'move' : 'pointer',
       });
 
-      marker.on('click', function() {
+      marker.on('click', function(e) {
+        if (e && e.originEvent) e.originEvent.stopPropagation();
         window.ReactNativeWebView.postMessage(JSON.stringify({
           type: 'markerClick',
           id: item.id,
-          editable: true,
-          title: item.title,
-          time: item.time,
-          location: item.location,
         }));
       });
 
-      marker.on('dragend', function() {
-        const pos = marker.getPosition();
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'markerDrag',
-          id: item.id,
-          lng: pos.getLng(),
-          lat: pos.getLat(),
-        }));
-      });
+      if (item.draggable) {
+        marker.on('dragend', function() {
+          const pos = marker.getPosition();
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'markerDrag',
+            id: item.id,
+            lng: pos.getLng(),
+            lat: pos.getLat(),
+          }));
+        });
+      }
 
       marker.setMap(map);
       markerInstances.push(marker);
@@ -148,9 +168,7 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
       }).setMap(map);
     }
 
-    if (markerInstances.length > 0) {
-      map.setFitView(markerInstances, false, [50, 50, 50, 50]);
-    }
+    window.__fitMapOnce(map, markerInstances);
   </script>
 </body>
 </html>`;
@@ -168,15 +186,20 @@ export function buildLeafletHtml(markers: MapMarkerPayload[], center: { lng: num
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; touch-action: none; }
-    .cartoon-pin { text-align: center; }
+    .cartoon-pin { text-align: center; width: 96px; }
     .cartoon-pin .bubble {
       width: 44px; height: 44px; border-radius: 16px; display: flex; align-items: center; justify-content: center;
-      font-size: 22px; border: 3px solid #fff; box-shadow: 0 8px 16px rgba(40,124,255,0.25); margin: 0 auto;
+      font-size: 22px; border: 3px solid #fff; box-shadow: 0 8px 16px rgba(40,124,255,0.25); margin: 0 auto; position: relative;
+    }
+    .cartoon-pin .index {
+      position: absolute; top: -8px; left: -8px; min-width: 18px; height: 18px; border-radius: 9px;
+      background: #fff; color: #1b63ff; font-size: 10px; font-weight: 900; display: flex; align-items: center; justify-content: center;
     }
     .cartoon-pin .title {
       margin-top: 4px; background: rgba(255,255,255,0.95); padding: 3px 6px; border-radius: 8px;
       font-size: 10px; font-weight: 800; color: #30496f;
     }
+    .cartoon-pin .time { margin-top: 2px; font-size: 9px; font-weight: 800; color: #7f93b1; }
   </style>
 </head>
 <body>
@@ -196,43 +219,39 @@ export function buildLeafletHtml(markers: MapMarkerPayload[], center: { lng: num
     const latlngs = [];
     markers.forEach(function(item) {
       latlngs.push([item.lat, item.lng]);
+      const timeLabel = item.timeRange + (item.duration ? ' · ' + item.duration : '');
       const icon = L.divIcon({
         className: '',
-        html: '<div class="cartoon-pin"><div class="bubble">' + item.icon + '</div><div class="title">' + item.title + '</div></div>',
-        iconSize: [72, 72],
-        iconAnchor: [36, 72],
+        html: '<div class="cartoon-pin"><div class="bubble">' + item.icon + '<div class="index">' + item.index + '</div></div><div class="title">' + item.title + '</div><div class="time">' + timeLabel + '</div></div>',
+        iconSize: [96, 96],
+        iconAnchor: [48, 84],
       });
-      const marker = L.marker([item.lat, item.lng], { icon, draggable: true }).addTo(map);
+      const marker = L.marker([item.lat, item.lng], { icon, draggable: item.draggable }).addTo(map);
       marker.on('click', function() {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'markerClick',
-          id: item.id,
-          editable: true,
-          title: item.title,
-          time: item.time,
-          location: item.location,
-        }));
+        window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'markerClick', id: item.id }));
       });
-      marker.on('dragend', function(e) {
-        const pos = e.target.getLatLng();
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'markerDrag',
-          id: item.id,
-          lng: pos.lng,
-          lat: pos.lat,
-        }));
-      });
+      if (item.draggable) {
+        marker.on('dragend', function(e) {
+          const pos = e.target.getLatLng();
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'markerDrag', id: item.id, lng: pos.lng, lat: pos.lat,
+          }));
+        });
+      }
     });
 
     if (latlngs.length > 1) {
       L.polyline(latlngs, { color: '#89B8FF', weight: 5, opacity: 0.85 }).addTo(map);
-      map.fitBounds(latlngs, { padding: [40, 40] });
     }
     window.mapApi.fitView = function() {
       if (latlngs.length > 0) map.fitBounds(latlngs, { padding: [40, 40] });
     };
     window.mapApi.zoomIn = function() { map.zoomIn(); };
     window.mapApi.zoomOut = function() { map.zoomOut(); };
+    if (latlngs.length > 0 && !window.__didInitialFit) {
+      map.fitBounds(latlngs, { padding: [40, 40] });
+      window.__didInitialFit = true;
+    }
   </script>
 </body>
 </html>`;
@@ -244,14 +263,19 @@ export function buildMapMarkers(items: ItineraryItem[], city: string): MapMarker
     const nodeType = resolveNodeType(item);
     return {
       id: item.id,
+      index: index + 1,
       lng: point.lng,
       lat: point.lat,
       icon: point.icon,
       title: item.title,
-      time: item.start_time,
+      startTime: item.start_time,
+      endTime: item.end_time,
+      timeRange: formatTimeRange(item.start_time, item.end_time),
+      duration: formatDurationLabel(item.start_time, item.end_time),
       location: item.location,
       nodeType,
       editable: true,
+      draggable: nodeType !== "hard_anchor",
     };
   });
 }
