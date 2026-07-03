@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     api_base_url: str = "http://localhost:8000"
     amap_api_key: str | None = None
     weather_api_key: str | None = None
+    speech_provider: str = "auto"  # baidu | dashscope | auto
+    baidu_asr_app_id: str | None = None
+    baidu_asr_api_key: str | None = None
+    baidu_asr_secret_key: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=[str(path) for path in ENV_FILES if path.exists()] or ".env",

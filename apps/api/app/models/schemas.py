@@ -45,6 +45,9 @@ class ItineraryItem(BaseModel):
     description: str
     route_from_previous: TransportLeg | None = None
     risk_flags: list[str] = Field(default_factory=list)
+    estimated_cost: int | None = None
+    booking_source: str | None = None
+    booking_deeplink: str | None = None
 
 
 class Itinerary(BaseModel):
@@ -160,6 +163,121 @@ class UpdateNodeRequest(BaseModel):
     geo_lat: float | None = None
     geo_lng: float | None = None
     day: int | None = None
+
+
+class SmartUpdateNodeRequest(UpdateNodeRequest):
+    instruction: str | None = None
+
+
+class SmartUpdatedItem(BaseModel):
+    id: str
+    day: int
+    start_time: str
+    end_time: str
+    title: str
+    location: str
+    category: Literal["transport", "meeting", "food", "sight", "hotel", "free", "alert"]
+    description: str
+    geo_lat: float | None = None
+    geo_lng: float | None = None
+
+
+class SmartUpdatePlan(BaseModel):
+    items: list[SmartUpdatedItem]
+    change_summary: str
+    affected_item_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SmartUpdateNodeResponse(BaseModel):
+    itinerary: Itinerary
+    change_summary: str
+    affected_item_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class DeleteNodeRequest(BaseModel):
+    user_id: str = "demo-user"
+    itinerary_id: str
+    item_id: str
+    instruction: str | None = None
+
+
+class ReorderNodesRequest(BaseModel):
+    user_id: str = "demo-user"
+    itinerary_id: str
+    item_ids: list[str]
+    instruction: str | None = None
+
+
+class POICandidate(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    name: str
+    category: Literal["food", "hotel", "sight"]
+    address: str
+    location: str
+    geo_lat: float | None = None
+    geo_lng: float | None = None
+    rating: float | None = None
+    price_estimate: int | None = None
+    price_label: str = ""
+    primary_source: str = "amap"
+    platform_scores: dict[str, float] = Field(default_factory=dict)
+    deeplinks: dict[str, str] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
+    reason: str = ""
+    distance_km: float | None = None
+    duration_minutes: int | None = None
+
+
+class RecommendPOIRequest(BaseModel):
+    user_id: str = "demo-user"
+    city: str
+    keyword: str
+    category: Literal["food", "hotel", "sight"] = "food"
+    day: int = 1
+    start_time: str = "12:00"
+    end_time: str = "13:30"
+    near_location: str | None = None
+    near_lat: float | None = None
+    near_lng: float | None = None
+    budget: str | None = None
+    itinerary_id: str | None = None
+
+
+class RecommendPOIResponse(BaseModel):
+    candidates: list[POICandidate]
+    summary: str
+    llm_recommendation: str
+
+
+class ConfirmPOIRequest(BaseModel):
+    user_id: str = "demo-user"
+    itinerary_id: str
+    candidate: POICandidate
+    day: int
+    start_time: str
+    end_time: str
+    replace_item_id: str | None = None
+    insert_after_item_id: str | None = None
+
+
+class PriceBreakdownItem(BaseModel):
+    label: str
+    amount: int
+    source: str
+    detail: str = ""
+
+
+class ItineraryPriceQuote(BaseModel):
+    transport: int
+    food: int
+    hotel: int
+    other: int
+    total: int
+    breakdown: list[PriceBreakdownItem] = Field(default_factory=list)
+    duration_text: str = ""
+    data_sources: list[str] = Field(default_factory=list)
 
 
 class UploadKind(str, Enum):

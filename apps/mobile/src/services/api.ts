@@ -12,6 +12,11 @@ import {
   TripReview,
 } from "../types";
 import { defaultStructured, parseTravelFromText, StructuredFields } from "../utils/parseTravelInput";
+import {
+  preferencesToApiList,
+  preferencesToTags,
+  TravelPreferences,
+} from "../utils/travelPreferences";
 
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const USER_ID = "demo-user";
@@ -152,6 +157,13 @@ export type UpdateNodePayload = {
   day?: number;
 };
 
+export type SmartUpdateNodeResponse = {
+  itinerary: NonNullable<ChatResponse["itinerary"]>;
+  change_summary: string;
+  affected_item_ids: string[];
+  warnings: string[];
+};
+
 export async function updateNode(itineraryId: string, itemId: string, payload: UpdateNodePayload) {
   const response = await fetch(`${API_BASE_URL}/itineraries/update-node`, {
     method: "POST",
@@ -164,6 +176,54 @@ export async function updateNode(itineraryId: string, itemId: string, payload: U
     }),
   });
   return parseResponse<{ itinerary: ChatResponse["itinerary"] }>(response);
+}
+
+export async function smartUpdateNode(
+  itineraryId: string,
+  itemId: string,
+  payload: UpdateNodePayload,
+  instruction?: string,
+) {
+  const response = await fetch(`${API_BASE_URL}/itineraries/smart-update-node`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: USER_ID,
+      itinerary_id: itineraryId,
+      item_id: itemId,
+      instruction: instruction?.trim() || undefined,
+      ...payload,
+    }),
+  });
+  return parseResponse<SmartUpdateNodeResponse>(response);
+}
+
+export async function deleteNode(itineraryId: string, itemId: string, instruction?: string) {
+  const response = await fetch(`${API_BASE_URL}/itineraries/delete-node`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: USER_ID,
+      itinerary_id: itineraryId,
+      item_id: itemId,
+      instruction: instruction?.trim() || undefined,
+    }),
+  });
+  return parseResponse<SmartUpdateNodeResponse>(response);
+}
+
+export async function reorderNodes(itineraryId: string, itemIds: string[], instruction?: string) {
+  const response = await fetch(`${API_BASE_URL}/itineraries/reorder-nodes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: USER_ID,
+      itinerary_id: itineraryId,
+      item_ids: itemIds,
+      instruction: instruction?.trim() || undefined,
+    }),
+  });
+  return parseResponse<SmartUpdateNodeResponse>(response);
 }
 
 export async function rescheduleNode(itineraryId: string, itemId: string, startTime: string) {
@@ -186,12 +246,25 @@ export function buildTravelRequest(
   documentIds: string[] = [],
   tags: string[] = [],
   links: string[] = [],
+  travelPreferences?: TravelPreferences,
 ): TravelRequestBundle {
   const hints = parseTravelFromText(message);
-  const preferences = structured.preferences
-    .split(/[/、,]/)
+  const manualPreferences = structured.preferences
+    .split(/[/、,;；]/)
     .map((item) => item.trim())
     .filter(Boolean);
+  const preferenceList = travelPreferences
+    ? preferencesToApiList(travelPreferences)
+    : manualPreferences.length
+      ? manualPreferences
+      : ["效率优先"];
+  const tagList = travelPreferences
+    ? [...new Set([...preferencesToTags(travelPreferences), ...tags])]
+    : tags.length
+      ? tags
+      : hints.tags.length
+        ? hints.tags
+        : ["出差"];
 
   return {
     user_id: USER_ID,
@@ -204,8 +277,8 @@ export function buildTravelRequest(
       start_date: structured.startDate,
       end_date: structured.endDate,
       vehicles: hints.vehicles.length ? hints.vehicles : ["高铁"],
-      tags: tags.length ? tags : hints.tags.length ? hints.tags : ["出差"],
-      preferences: preferences.length ? preferences : ["效率优先"],
+      tags: tagList,
+      preferences: preferenceList,
     },
   };
 }
@@ -293,4 +366,57 @@ export async function acceptReplan(proposalId: string) {
 export async function getTripReview(itineraryId: string) {
   const response = await fetch(`${API_BASE_URL}/trips/${itineraryId}/review`);
   return parseResponse<{ review: TripReview }>(response);
+}
+
+export type RecommendPOIParams = {
+  city: string;
+  keyword: string;
+  category: "food" | "hotel" | "sight";
+  day?: number;
+  start_time?: string;
+  end_time?: string;
+  near_lat?: number;
+  near_lng?: number;
+  itinerary_id?: string;
+};
+
+export async function searchRecommendations(params: RecommendPOIParams) {
+  const response = await fetch(`${API_BASE_URL}/recommendations/search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: USER_ID, ...params }),
+  });
+  return parseResponse<import("../types").RecommendPOIResponse>(response);
+}
+
+export async function confirmPOI(
+  itineraryId: string,
+  candidate: import("../types").POICandidate,
+  options: {
+    day: number;
+    start_time: string;
+    end_time: string;
+    replace_item_id?: string;
+    insert_after_item_id?: string;
+  },
+) {
+  const response = await fetch(`${API_BASE_URL}/nodes/confirm-poi`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: USER_ID,
+      itinerary_id: itineraryId,
+      candidate,
+      ...options,
+    }),
+  });
+  return parseResponse<{
+    itinerary: NonNullable<ChatResponse["itinerary"]>;
+    price_quote: import("../types").ItineraryPriceQuote;
+  }>(response);
+}
+
+export async function getPriceQuote(itineraryId: string) {
+  const response = await fetch(`${API_BASE_URL}/itineraries/${itineraryId}/price-quote`);
+  return parseResponse<import("../types").ItineraryPriceQuote>(response);
 }

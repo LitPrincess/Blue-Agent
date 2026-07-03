@@ -5,7 +5,9 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
@@ -16,7 +18,9 @@
       "adaptiveIcon": {
         "backgroundColor": "#EAF3FF"
       },
-      "permissions": ["RECORD_AUDIO"]
+      "permissions": [
+        "RECORD_AUDIO"
+      ]
     },
     "plugins": [
       [
@@ -24,7 +28,19 @@
         {
           "microphonePermission": "用于语音输入您的出行需求"
         }
-      ]
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "用于语音输入您的出行需求",
+          "speechRecognitionPermission": "用于将您的语音转为文字",
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox"
+          ]
+        }
+      ],
+      "expo-font",
+      "expo-asset"
     ],
     "extra": {
       "apiBaseUrl": "http://localhost:8000"

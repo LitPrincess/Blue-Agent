@@ -21,10 +21,10 @@ from app.models.schemas import (
     SystemSyncResult,
     TravelIncident,
     TravelOrder,
-    TravelQuote,
     TravelRequestBundle,
     TripReview,
 )
+from app.services.price_engine import price_engine
 from app.services.store import store
 
 
@@ -43,10 +43,11 @@ class PlanComparisonService:
         base = self._apply_structured_intent(base, request)
         store.save_itinerary(base)
 
+        base_quote = price_engine.quote_itinerary(base)
         options = [
-            self._option(base, "最快抵达方案", "fastest", 1280, 86, "4h20m", "low"),
-            self._option(base, "均衡舒适方案", "balanced", 1580, 92, "5h10m", "low"),
-            self._option(base, "低预算弹性方案", "comfortable", 980, 78, "6h30m", "medium"),
+            self._option(base, "最快抵达方案", "fastest", base_quote, 1.08, 86, "low"),
+            self._option(base, "均衡舒适方案", "balanced", base_quote, 1.0, 92, "low"),
+            self._option(base, "低预算弹性方案", "comfortable", base_quote, 0.88, 78, "medium"),
         ]
         comparison = PlanComparison(
             user_id=request.user_id,
@@ -100,31 +101,39 @@ class PlanComparisonService:
         base: Itinerary,
         title: str,
         strategy: str,
-        price: int,
+        base_quote,
+        price_multiplier: float,
         comfort: int,
-        duration: str,
         risk: str,
     ) -> PlanOption:
         itinerary = deepcopy(base)
         itinerary.id = base.id
         itinerary.title = title
-        quote = TravelQuote(
-            flight="CA1832 北京首都 T3 → 目的地枢纽",
-            hotel=f"{base.intent.accommodation_area or base.intent.destination}精选商务酒店",
-            local_transport="高德导航 + 打车/地铁混合",
-            total_price=price,
-            duration_text=duration,
-            comfort_score=comfort,
-            risk_level=risk,
+        adjusted = base_quote.model_copy(
+            update={
+                "transport": int(base_quote.transport * price_multiplier),
+                "food": int(base_quote.food * price_multiplier),
+                "hotel": int(base_quote.hotel * price_multiplier),
+                "other": int(base_quote.other * price_multiplier),
+            }
         )
+        adjusted = adjusted.model_copy(
+            update={"total": adjusted.transport + adjusted.food + adjusted.hotel + adjusted.other}
+        )
+        quote = price_engine.to_travel_quote(itinerary, adjusted, strategy)
+        quote = quote.model_copy(update={"comfort_score": comfort, "risk_level": risk})
+        source_note = "、".join(adjusted.data_sources) if adjusted.data_sources else "估算"
         risks = ["高峰时段交通拥堵"] if risk == "medium" else ["需提前完成景点预约"]
         return PlanOption(
             title=title,
             strategy=strategy,  # type: ignore[arg-type]
             quote=quote,
-            highlights=["自动匹配航班/酒店", "保留行程缓冲", "可同步日历与地图"],
+            highlights=["高德真实路线/POI", "多平台口碑对比", "可同步日历与地图"],
             risks=risks,
-            recommendation=f"{title}适合当前约束，舒适度 {comfort}/100，预计总价 ¥{price}。",
+            recommendation=(
+                f"{title}：交通 ¥{adjusted.transport}、餐饮 ¥{adjusted.food}、住宿 ¥{adjusted.hotel}，"
+                f"总价 ¥{adjusted.total}（来源：{source_note}）。"
+            ),
             itinerary=itinerary,
         )
 
@@ -325,10 +334,11 @@ class TripReviewService:
         itinerary = store.get_itinerary(itinerary_id)
         if itinerary is None:
             raise ValueError("itinerary not found")
+        quote = price_engine.quote_itinerary(itinerary)
         review = TripReview(
             itinerary_id=itinerary.id,
             summary=f"{itinerary.title} 已完成回顾：整体节奏稳定，关键节点已沉淀为个人偏好。",
-            budget_total=2842,
+            budget_total=quote.total,
             completed_items=len(itinerary.items),
             preference_memory=[
                 f"偏好住宿区域：{itinerary.intent.accommodation_area or '市中心'}",

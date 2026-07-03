@@ -1,7 +1,8 @@
 import { ItineraryItem } from "../types";
+import { formatItemDateLabel, formatItemSchedule } from "./dateUtils";
 import { formatDurationLabel, formatTimeRange } from "./durationUtils";
 import { resolveMapPoint } from "./geoCoords";
-import { resolveNodeType } from "./nodeUtils";
+import { isEditableNode, resolveNodeType } from "./nodeUtils";
 
 export type MapMarkerPayload = {
   id: string;
@@ -13,6 +14,8 @@ export type MapMarkerPayload = {
   startTime: string;
   endTime: string;
   timeRange: string;
+  dateLabel: string;
+  scheduleLabel: string;
   duration: string;
   location: string;
   nodeType: "hard_anchor" | "semi_anchor" | "soft_task";
@@ -114,7 +117,7 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
       path.push([item.lng, item.lat]);
       const typeBadge = item.nodeType === 'hard_anchor' ? '<div class="badge">硬</div>' :
         item.nodeType === 'semi_anchor' ? '<div class="badge">半</div>' : '';
-      const timeLabel = item.timeRange + (item.duration ? ' · ' + item.duration : '');
+      const timeLabel = item.scheduleLabel + (item.duration ? ' · ' + item.duration : '');
       const html = '<div class="cartoon-marker ' + item.nodeType + '">' +
         '<div class="marker-bubble">' + item.icon + '<div class="marker-index">' + item.index + '</div>' + typeBadge + '</div>' +
         '<div class="marker-stem"></div>' +
@@ -219,7 +222,7 @@ export function buildLeafletHtml(markers: MapMarkerPayload[], center: { lng: num
     const latlngs = [];
     markers.forEach(function(item) {
       latlngs.push([item.lat, item.lng]);
-      const timeLabel = item.timeRange + (item.duration ? ' · ' + item.duration : '');
+      const timeLabel = item.scheduleLabel + (item.duration ? ' · ' + item.duration : '');
       const icon = L.divIcon({
         className: '',
         html: '<div class="cartoon-pin"><div class="bubble">' + item.icon + '<div class="index">' + item.index + '</div></div><div class="title">' + item.title + '</div><div class="time">' + timeLabel + '</div></div>',
@@ -257,7 +260,11 @@ export function buildLeafletHtml(markers: MapMarkerPayload[], center: { lng: num
 </html>`;
 }
 
-export function buildMapMarkers(items: ItineraryItem[], city: string): MapMarkerPayload[] {
+export function buildMapMarkers(
+  items: ItineraryItem[],
+  city: string,
+  startDate?: string | null,
+): MapMarkerPayload[] {
   return items.map((item, index) => {
     const point = resolveMapPoint(item, index, city);
     const nodeType = resolveNodeType(item);
@@ -271,11 +278,13 @@ export function buildMapMarkers(items: ItineraryItem[], city: string): MapMarker
       startTime: item.start_time,
       endTime: item.end_time,
       timeRange: formatTimeRange(item.start_time, item.end_time),
+      dateLabel: formatItemDateLabel(startDate, item.day),
+      scheduleLabel: formatItemSchedule(startDate, item.day, item.start_time, item.end_time),
       duration: formatDurationLabel(item.start_time, item.end_time),
       location: item.location,
       nodeType,
-      editable: true,
-      draggable: nodeType !== "hard_anchor",
+      editable: isEditableNode(item),
+      draggable: isEditableNode(item),
     };
   });
 }

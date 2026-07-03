@@ -20,11 +20,21 @@ class SpeechService:
 
     @property
     def configured(self) -> bool:
-        return bool(self.settings.dashscope_api_key)
+        if self.settings.speech_provider == "baidu":
+            return bool(self.settings.baidu_asr_api_key and self.settings.baidu_asr_secret_key)
+        if self.settings.speech_provider == "dashscope":
+            return bool(self.settings.dashscope_api_key)
+        return bool(
+            (self.settings.baidu_asr_api_key and self.settings.baidu_asr_secret_key)
+            or self.settings.dashscope_api_key
+        )
 
     async def transcribe(self, file_bytes: bytes, filename: str) -> str:
         if not self.configured:
-            raise RuntimeError("DASHSCOPE_API_KEY 未配置，无法使用语音识别")
+            raise RuntimeError(
+                "语音识别未配置。请在 .env 中设置 BAIDU_ASR_API_KEY / BAIDU_ASR_SECRET_KEY，"
+                "或 DASHSCOPE_API_KEY。"
+            )
         if len(file_bytes) < self.MIN_AUDIO_BYTES:
             raise RuntimeError("录音太短，请按住麦克风多说几秒")
 
@@ -37,6 +47,112 @@ class SpeechService:
             return await asyncio.to_thread(self._transcribe_sync, temp_path, suffix)
         finally:
             Path(temp_path).unlink(missing_ok=True)
+
+    def _transcribe_sync(self, file_path: str, suffix: str) -> str:
+        provider = self.settings.speech_provider.lower()
+        errors: list[str] = []
+
+        if provider == "baidu":
+            return self._transcribe_baidu(file_path, suffix)
+
+        if provider == "dashscope":
+            return self._transcribe_dashscope(file_path, suffix)
+
+        if self.settings.baidu_asr_api_key and self.settings.baidu_asr_secret_key:
+            try:
+                return self._transcribe_baidu(file_path, suffix)
+            except Exception as error:
+                errors.append(f"百度 ASR：{error}")
+
+        if self.settings.dashscope_api_key:
+            try:
+                return self._transcribe_dashscope(file_path, suffix)
+            except Exception as error:
+                errors.append(f"DashScope：{error}")
+
+        raise RuntimeError(self._friendly_error("；".join(errors) or "语音识别失败"))
+
+    def _transcribe_baidu(self, file_path: str, suffix: str) -> str:
+        try:
+            from aip import AipSpeech
+        except ImportError as error:
+            raise RuntimeError(
+                f"百度 ASR SDK 加载失败：{error}。请执行：pip install baidu-aip chardet"
+            ) from error
+
+        api_key = self.settings.baidu_asr_api_key
+        secret_key = self.settings.baidu_asr_secret_key
+        if not api_key or not secret_key:
+            raise RuntimeError("百度 ASR 未配置 API Key / Secret Key")
+
+        app_id = self.settings.baidu_asr_app_id or "0"
+        client = AipSpeech(app_id, api_key, secret_key)
+
+        audio_format = self._baidu_audio_format(suffix)
+        with open(file_path, "rb") as audio_file:
+            audio_bytes = audio_file.read()
+
+        result = client.asr(
+            audio_bytes,
+            audio_format,
+            16000,
+            {"dev_pid": 1537},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("百度 ASR 返回格式异常")
+
+        err_no = result.get("err_no", -1)
+        if err_no != 0:
+            err_msg = result.get("err_msg") or f"识别失败（错误码 {err_no}）"
+            raise RuntimeError(self._friendly_baidu_error(err_no, err_msg))
+
+        texts = result.get("result") or []
+        text = "".join(str(item) for item in texts).strip()
+        if not text:
+            raise RuntimeError("未识别到有效语音内容")
+        return text
+
+    @staticmethod
+    def _baidu_audio_format(suffix: str) -> str:
+        normalized = suffix.lower().lstrip(".")
+        if normalized in {"m4a", "mp4"}:
+            return "m4a"
+        if normalized in {"wav", "pcm", "amr", "mp3"}:
+            return normalized
+        return "m4a"
+
+    @staticmethod
+    def _friendly_baidu_error(err_no: int, err_msg: str) -> str:
+        if err_no in {3300, 3301, 3302, 3303, 3304, 3305}:
+            return f"百度 ASR 参数错误：{err_msg}"
+        if err_no in {3307, 3308}:
+            return f"百度 ASR 音频格式或采样率不匹配：{err_msg}（请使用 16kHz 单声道 m4a）"
+        if err_no in {3309}:
+            return "百度 ASR 音频过长，请控制在 60 秒以内"
+        return f"百度 ASR：{err_msg}"
+
+    def _transcribe_dashscope(self, file_path: str, suffix: str) -> str:
+        if not self.settings.dashscope_api_key:
+            raise RuntimeError("DASHSCOPE_API_KEY 未配置")
+
+        unique_name = f"{uuid.uuid4().hex}{suffix}"
+        errors: list[str] = []
+        oss_url: str | None = None
+
+        try:
+            oss_url = self._upload_to_dashscope(file_path, unique_name)
+            return self._transcribe_paraformer(file_path, unique_name, oss_url)
+        except Exception as error:
+            errors.append(str(error))
+
+        try:
+            if not oss_url:
+                oss_url = self._upload_to_dashscope(file_path, f"{uuid.uuid4().hex}{suffix}")
+            return self._transcribe_multimodal(oss_url)
+        except Exception as error:
+            errors.append(str(error))
+
+        raise RuntimeError(self._friendly_error("；".join(errors) or "语音识别失败"))
 
     def _upload_to_dashscope(self, file_path: str, filename: str) -> str:
         api_key = self.settings.dashscope_api_key
@@ -70,25 +186,15 @@ class SpeechService:
             upload_resp.raise_for_status()
             return f"oss://{key}"
 
-    def _transcribe_sync(self, file_path: str, suffix: str) -> str:
-        unique_name = f"{uuid.uuid4().hex}{suffix}"
-        errors: list[str] = []
-        oss_url: str | None = None
-
-        try:
-            oss_url = self._upload_to_dashscope(file_path, unique_name)
-            return self._transcribe_paraformer(file_path, unique_name, oss_url)
-        except Exception as error:
-            errors.append(str(error))
-
-        try:
-            if not oss_url:
-                oss_url = self._upload_to_dashscope(file_path, f"{uuid.uuid4().hex}{suffix}")
-            return self._transcribe_multimodal(oss_url)
-        except Exception as error:
-            errors.append(str(error))
-
-        raise RuntimeError("；".join(errors) or "语音识别失败")
+    @staticmethod
+    def _friendly_error(message: str) -> str:
+        lower = message.lower()
+        if "quota exceeded" in lower or "free allocated quota" in lower:
+            return (
+                "阿里云 Paraformer 语音免费额度已用完。"
+                "可改用百度 ASR（SPEECH_PROVIDER=baidu），或在手机端使用系统语音识别。"
+            )
+        return message
 
     def _transcribe_paraformer(self, file_path: str, filename: str, oss_url: str) -> str:
         try:

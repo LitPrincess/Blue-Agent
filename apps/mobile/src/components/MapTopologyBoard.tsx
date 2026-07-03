@@ -5,12 +5,14 @@ import { WebView, WebViewMessageEvent } from "react-native-webview";
 import { Itinerary, ItineraryItem } from "../types";
 import { UpdateNodePayload } from "../services/api";
 import { resolveCityCenter } from "../utils/geoCoords";
+import { formatItemSchedule } from "../utils/dateUtils";
 import { buildAmapHtml, buildLeafletHtml, buildMapMarkers } from "../utils/mapHtml";
 import { nodeVisual } from "../utils/nodeUtils";
 
 type Props = {
   itinerary: Itinerary;
   city: string;
+  startDate?: string | null;
   onUpdateNode: (itemId: string, payload: UpdateNodePayload) => Promise<void>;
   onEditItem: (item: ItineraryItem) => void;
   onMapInteractionChange?: (active: boolean) => void;
@@ -21,6 +23,7 @@ const MAP_HEIGHT = 420;
 export function MapTopologyBoard({
   itinerary,
   city,
+  startDate,
   onUpdateNode,
   onEditItem,
   onMapInteractionChange,
@@ -31,14 +34,14 @@ export function MapTopologyBoard({
   const mapCity = city || itinerary.intent.destination || "北京";
 
   const html = useMemo(() => {
-    const markers = buildMapMarkers(items, mapCity);
+    const markers = buildMapMarkers(items, mapCity, startDate ?? itinerary.intent.start_date);
     const centerPoint = resolveCityCenter(mapCity);
     const center = { lng: centerPoint.lng, lat: centerPoint.lat };
     if (amapKey) {
       return buildAmapHtml(amapKey, markers, center);
     }
     return buildLeafletHtml(markers, center);
-  }, [amapKey, items, mapCity]);
+  }, [amapKey, items, mapCity, startDate, itinerary.intent.start_date]);
 
   function injectMapCommand(script: string) {
     webRef.current?.injectJavaScript(`${script}; true;`);
@@ -132,7 +135,9 @@ export function MapTopologyBoard({
         {items.map((item, index) => (
           <Pressable key={item.id} style={styles.nodeChip} onPress={() => onEditItem(item)}>
             <Text style={styles.nodeChipIndex}>#{index + 1}</Text>
-            <Text style={styles.nodeChipTime}>{item.start_time}-{item.end_time}</Text>
+            <Text style={styles.nodeChipTime}>
+              {formatItemSchedule(startDate ?? itinerary.intent.start_date, item.day, item.start_time, item.end_time)}
+            </Text>
             <Text style={styles.nodeChipTitle} numberOfLines={1}>
               {item.title}
             </Text>
@@ -192,7 +197,7 @@ const styles = StyleSheet.create({
   fitText: { color: "#287CFF", fontSize: 10, fontWeight: "900" },
   chipRow: { gap: 8, paddingVertical: 2 },
   nodeChip: {
-    width: 96,
+    width: 112,
     paddingHorizontal: 10,
     paddingVertical: 8,
     borderRadius: 14,

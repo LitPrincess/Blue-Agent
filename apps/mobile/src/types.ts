@@ -27,6 +27,9 @@ export type ItineraryItem = {
   geo_lng?: number | null;
   description: string;
   risk_flags: string[];
+  estimated_cost?: number | null;
+  booking_source?: string | null;
+  booking_deeplink?: string | null;
 };
 
 export type Itinerary = {
@@ -191,4 +194,48 @@ export type TripReview = {
   completed_items: number;
   preference_memory: string[];
   next_trip_suggestions: string[];
+};
+
+export type POICandidate = {
+  id: string;
+  name: string;
+  category: "food" | "hotel" | "sight";
+  address: string;
+  location: string;
+  geo_lat?: number | null;
+  geo_lng?: number | null;
+  rating?: number | null;
+  price_estimate?: number | null;
+  price_label: string;
+  primary_source: string;
+  platform_scores: Record<string, number>;
+  deeplinks: Record<string, string>;
+  tags: string[];
+  reason: string;
+  distance_km?: number | null;
+  duration_minutes?: number | null;
+};
+
+export type RecommendPOIResponse = {
+  candidates: POICandidate[];
+  summary: string;
+  llm_recommendation: string;
+};
+
+export type PriceBreakdownItem = {
+  label: string;
+  amount: number;
+  source: string;
+  detail: string;
+};
+
+export type ItineraryPriceQuote = {
+  transport: number;
+  food: number;
+  hotel: number;
+  other: number;
+  total: number;
+  breakdown: PriceBreakdownItem[];
+  duration_text: string;
+  data_sources: string[];
 };

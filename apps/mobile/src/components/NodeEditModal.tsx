@@ -13,13 +13,15 @@ export type NodeEditDraft = {
 type Props = {
   visible: boolean;
   draft: NodeEditDraft | null;
+  dateLabel?: string;
   saving?: boolean;
   onChange: (draft: NodeEditDraft) => void;
   onClose: () => void;
   onSave: () => void;
+  onDelete?: () => void;
 };
 
-export function NodeEditModal({ visible, draft, saving, onChange, onClose, onSave }: Props) {
+export function NodeEditModal({ visible, draft, dateLabel, saving, onChange, onClose, onSave, onDelete }: Props) {
   if (!draft) return null;
 
   return (
@@ -27,6 +29,7 @@ export function NodeEditModal({ visible, draft, saving, onChange, onClose, onSav
       <View style={styles.backdrop}>
         <View style={styles.card}>
           <Text style={styles.title}>编辑节点</Text>
+          {dateLabel ? <Text style={styles.dateBadge}>{dateLabel}</Text> : null}
           <Text style={styles.label}>标题</Text>
           <TextInput
             style={styles.input}
@@ -57,14 +60,21 @@ export function NodeEditModal({ visible, draft, saving, onChange, onClose, onSav
             value={draft.location}
             onChangeText={(value) => onChange({ ...draft, location: value })}
           />
-          <Text style={styles.hint}>也可在地图上拖动地标调整位置。</Text>
+          <Text style={styles.hint}>保存后 Agent 将联动调整相关节点的时间与安排。</Text>
           <View style={styles.actions}>
-            <Pressable style={styles.cancel} onPress={onClose}>
-              <Text style={styles.cancelText}>取消</Text>
-            </Pressable>
-            <Pressable style={[styles.save, saving ? styles.saveDisabled : null]} disabled={saving} onPress={onSave}>
-              <Text style={styles.saveText}>{saving ? "保存中…" : "保存"}</Text>
-            </Pressable>
+            {onDelete ? (
+              <Pressable style={styles.delete} onPress={onDelete} disabled={saving}>
+                <Text style={styles.deleteText}>删除</Text>
+              </Pressable>
+            ) : null}
+            <View style={styles.actionRight}>
+              <Pressable style={styles.cancel} onPress={onClose}>
+                <Text style={styles.cancelText}>取消</Text>
+              </Pressable>
+              <Pressable style={[styles.save, saving ? styles.saveDisabled : null]} disabled={saving} onPress={onSave}>
+                <Text style={styles.saveText}>{saving ? "保存中…" : "保存"}</Text>
+              </Pressable>
+            </View>
           </View>
         </View>
       </View>
@@ -97,6 +107,17 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFFFFF",
   },
   title: { color: "#233B63", fontSize: 16, fontWeight: "900", marginBottom: 12 },
+  dateBadge: {
+    alignSelf: "flex-start",
+    marginBottom: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "#EEF6FF",
+    color: "#287CFF",
+    fontSize: 10,
+    fontWeight: "900",
+  },
   label: { color: "#7085A2", fontSize: 10, fontWeight: "900", marginTop: 8, marginBottom: 6 },
   input: {
     borderWidth: 1,
@@ -120,7 +141,17 @@ const styles = StyleSheet.create({
   slotText: { color: "#527099", fontSize: 9, fontWeight: "900" },
   slotTextActive: { color: "#FFFFFF" },
   hint: { marginTop: 10, color: "#8BA0BD", fontSize: 10, lineHeight: 15 },
-  actions: { flexDirection: "row", justifyContent: "flex-end", gap: 10, marginTop: 16 },
+  actions: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 16 },
+  actionRight: { flexDirection: "row", gap: 10 },
+  delete: {
+    minWidth: 56,
+    minHeight: 40,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FFF1F0",
+  },
+  deleteText: { color: "#E55353", fontSize: 13, fontWeight: "900" },
   cancel: {
     minWidth: 72,
     minHeight: 40,

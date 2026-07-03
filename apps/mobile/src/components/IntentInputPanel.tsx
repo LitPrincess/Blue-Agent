@@ -17,10 +17,17 @@ import {
   useAudioRecorder,
 } from "expo-audio";
 import DateTimePicker, { DateTimePickerChangeEvent } from "@react-native-community/datetimepicker";
+import { WebViewMessageEvent } from "react-native-webview";
 
 import { parseIntent, transcribeVoice } from "../services/api";
+import { SpeechWebHost, SpeechWebApi } from "../components/SpeechWebHost";
 import {
-  buildEffectiveMessage,
+  isDeviceSpeechAvailable,
+  normalizeSpeechError,
+  requestDeviceSpeechPermissions,
+  startDeviceSpeech,
+} from "../utils/deviceSpeech";
+import {
   formatDisplayDate,
   hasTravelInput,
   mergeStructured,
@@ -31,6 +38,12 @@ import {
   toIsoDate,
   todayDate,
 } from "../utils/parseTravelInput";
+import { TravelPreferencesEntry, TravelPreferencesModal } from "./TravelPreferencesModal";
+import {
+  preferenceSummary,
+  serializeTravelPreferences,
+  TravelPreferences,
+} from "../utils/travelPreferences";
 import { VOICE_RECORDING_OPTIONS } from "../utils/voiceRecording";
 
 export type InputMode = "voice" | "text" | "file";
@@ -45,28 +58,27 @@ type Props = {
   onMessageChange: (value: string) => void;
   structured: StructuredFields;
   setStructured: Dispatch<SetStateAction<StructuredFields>>;
-  selectedTags: string[];
-  onToggleTag: (tag: string) => void;
+  travelPreferences: TravelPreferences;
+  onTravelPreferencesChange: (value: TravelPreferences) => void;
   uploads: UploadedFile[];
   onUploadPress: () => void;
   onAnalyze: () => void;
   loading: boolean;
 };
 
-const TAG_OPTIONS = ["出差", "旅游", "周末游", "美食", "景点", "少走路"];
-
 export function IntentInputPanel({
   message,
   onMessageChange,
   structured,
   setStructured,
-  selectedTags,
-  onToggleTag,
+  travelPreferences,
+  onTravelPreferencesChange,
   uploads,
   onUploadPress,
   onAnalyze,
   loading,
 }: Props) {
+  const [preferencesVisible, setPreferencesVisible] = useState(false);
   const [mode, setMode] = useState<InputMode>("text");
   const audioRecorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
   const [listening, setListening] = useState(false);
@@ -79,7 +91,12 @@ export function IntentInputPanel({
     endDate: false,
     preferences: false,
   });
+  const [voiceEngine, setVoiceEngine] = useState<"device" | "web" | "cloud" | null>(null);
   const parseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voiceModeRef = useRef<"device" | "web" | "cloud" | null>(null);
+  const deviceStopRef = useRef<(() => void) | null>(null);
+  const speechWebRef = useRef<SpeechWebApi | null>(null);
+  const latestVoiceTextRef = useRef("");
 
   useEffect(() => {
     const hints = parseTravelFromText(message);
@@ -118,16 +135,53 @@ export function IntentInputPanel({
 
   async function startRecording() {
     try {
+      setMode("voice");
+      latestVoiceTextRef.current = "";
+
+      if (await isDeviceSpeechAvailable()) {
+        const granted = await requestDeviceSpeechPermissions();
+        if (!granted) {
+          Alert.alert("需要权限", "请在系统设置中允许麦克风和语音识别权限。");
+          return;
+        }
+        voiceModeRef.current = "device";
+        setVoiceEngine("device");
+        deviceStopRef.current = startDeviceSpeech(
+          (text) => {
+            latestVoiceTextRef.current = text;
+            onMessageChange(text);
+          },
+          (errorMessage) => {
+            Alert.alert("语音识别失败", normalizeSpeechError(errorMessage));
+          },
+        );
+        if (!deviceStopRef.current) {
+          voiceModeRef.current = null;
+        } else {
+          setListening(true);
+          return;
+        }
+      }
+
+      if (Platform.OS === "web" && speechWebRef.current) {
+        voiceModeRef.current = "web";
+        setVoiceEngine("web");
+        speechWebRef.current.start();
+        setListening(true);
+        return;
+      }
+
       const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) {
         Alert.alert("需要麦克风权限", "请在系统设置中允许麦克风访问后再试。");
         return;
       }
+      voiceModeRef.current = "cloud";
+      setVoiceEngine("cloud");
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
       await audioRecorder.prepareToRecordAsync();
       audioRecorder.record();
       setListening(true);
-      setMode("voice");
     } catch (error) {
       Alert.alert("无法开始录音", error instanceof Error ? error.message : "请稍后重试");
     }
@@ -136,18 +190,65 @@ export function IntentInputPanel({
   async function stopRecording() {
     if (!listening) return;
     setVoiceBusy(true);
+    setListening(false);
+
     try {
+      if (voiceModeRef.current === "device" && deviceStopRef.current) {
+        deviceStopRef.current();
+        deviceStopRef.current = null;
+        voiceModeRef.current = null;
+        setVoiceEngine(null);
+        const text = latestVoiceTextRef.current.trim();
+        if (!text) throw new Error("未识别到有效语音，请靠近麦克风重试");
+        onMessageChange(text);
+        Alert.alert("语音转写完成", "已使用系统语音识别，可继续编辑。");
+        return;
+      }
+
+      if (voiceModeRef.current === "web" && speechWebRef.current) {
+        speechWebRef.current.stop();
+        voiceModeRef.current = null;
+        setVoiceEngine(null);
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        const text = latestVoiceTextRef.current.trim();
+        if (!text) throw new Error("未识别到有效语音，请检查网络或改用文字输入");
+        onMessageChange(text);
+        Alert.alert("语音转写完成", "已使用浏览器语音识别，可继续编辑。");
+        return;
+      }
+
       await audioRecorder.stop();
       const uri = audioRecorder.uri;
-      setListening(false);
+      voiceModeRef.current = null;
+      setVoiceEngine(null);
       if (!uri) throw new Error("录音文件为空");
       const result = await transcribeVoice(uri);
       onMessageChange(result.text);
       Alert.alert("语音转写完成", "已填入识别结果，可继续编辑。");
     } catch (error) {
-      Alert.alert("语音识别失败", error instanceof Error ? error.message : "请确认后端已启动且已配置阿里 API");
+      Alert.alert("语音识别失败", normalizeSpeechError(error instanceof Error ? error.message : "请稍后重试"));
     } finally {
       setVoiceBusy(false);
+    }
+  }
+
+  function handleSpeechWebMessage(event: WebViewMessageEvent) {
+    try {
+      const payload = JSON.parse(event.nativeEvent.data) as {
+        type: string;
+        text?: string;
+        final?: boolean;
+        message?: string;
+      };
+      if (payload.type === "result" && payload.text) {
+        latestVoiceTextRef.current = payload.text;
+        onMessageChange(payload.text);
+      }
+      if (payload.type === "error") {
+        Alert.alert("语音识别失败", normalizeSpeechError(payload.message || "Web 语音识别失败"));
+      }
+    } catch {
+      // ignore malformed messages
     }
   }
 
@@ -179,6 +280,12 @@ export function IntentInputPanel({
 
   return (
     <View style={styles.wrap}>
+      <SpeechWebHost
+        onReady={(api) => {
+          speechWebRef.current = api;
+        }}
+        onMessage={handleSpeechWebMessage}
+      />
       <View style={styles.agentBubble}>
         <Text style={styles.agentBubbleText}>你好，我是你的旅行导演 Agent。告诉我你的想法，剩下的交给我。</Text>
       </View>
@@ -217,7 +324,17 @@ export function IntentInputPanel({
             </Pressable>
             <View style={styles.voiceBody}>
               <Text style={styles.inputTitle}>
-                {voiceBusy ? "正在识别..." : listening ? "正在录音，再次点击结束" : "点击麦克风开始说话"}
+                {voiceBusy
+                  ? "正在识别..."
+                  : listening
+                    ? voiceEngine === "cloud"
+                      ? "正在录音，再次点击结束并上传云端识别"
+                      : voiceEngine === "web"
+                        ? "正在聆听（浏览器识别），再次点击结束"
+                        : "正在聆听，再次点击结束"
+                    : Platform.OS === "web"
+                      ? "点击麦克风开始说话"
+                      : "点击麦克风开始说话（云端识别）"}
               </Text>
               <View style={styles.waveRow}>
                 {[8, 14, 20, 14, 8, 16, 22, 16].map((height, index) => (
@@ -259,7 +376,7 @@ export function IntentInputPanel({
         ) : null}
       </View>
 
-      <Text style={styles.quickLabel}>快捷标签（可选）</Text>
+      <Text style={styles.quickLabel}>行程要素</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickRow}>
         <FieldCard icon="📍" label="出发地" value={structured.origin} onChange={(value) => updateField("origin", value)} />
         <FieldCard icon="📍" label="目的地" value={structured.destination} onChange={(value) => updateField("destination", value)} />
@@ -277,7 +394,7 @@ export function IntentInputPanel({
           editable={false}
           onPress={() => setDateTarget("endDate")}
         />
-        <FieldCard icon="⭐" label="偏好" value={structured.preferences || "点击填写"} onChange={(value) => updateField("preferences", value)} />
+        <FieldCard icon="⭐" label="偏好" value={structured.preferences || preferenceSummary(travelPreferences)} onChange={(value) => updateField("preferences", value)} />
       </ScrollView>
 
       <View style={styles.routeHero}>
@@ -364,18 +481,19 @@ export function IntentInputPanel({
         )
       ) : null}
 
-      <View style={styles.tagRow}>
-        {TAG_OPTIONS.map((tag) => {
-          const active = selectedTags.includes(tag);
-          return (
-            <Pressable key={tag} style={[styles.tag, active && styles.tagActive]} onPress={() => onToggleTag(tag)}>
-              <Text style={[styles.tagText, active && styles.tagTextActive]}>{active ? `✓ ${tag}` : tag}</Text>
-            </Pressable>
-          );
-        })}
-      </View>
+      <TravelPreferencesEntry value={travelPreferences} onPress={() => setPreferencesVisible(true)} />
 
-      <EntityPreview structured={structured} message={message} />
+      <TravelPreferencesModal
+        visible={preferencesVisible}
+        value={travelPreferences}
+        onClose={() => setPreferencesVisible(false)}
+        onComplete={(value) => {
+          onTravelPreferencesChange(value);
+          updateField("preferences", serializeTravelPreferences(value));
+        }}
+      />
+
+      <EntityPreview structured={structured} message={message} travelPreferences={travelPreferences} />
 
       <Pressable
         style={[styles.cta, !hasTravelInput(message, structured) && styles.ctaDisabled]}
@@ -422,13 +540,21 @@ function FieldCard({
   return content;
 }
 
-function EntityPreview({ structured, message }: { structured: StructuredFields; message: string }) {
+function EntityPreview({
+  structured,
+  message,
+  travelPreferences,
+}: {
+  structured: StructuredFields;
+  message: string;
+  travelPreferences: TravelPreferences;
+}) {
   if (!message.trim()) return null;
   const items = [
     { label: "行动", value: "出差 / 住宿 / 餐饮 / 游览" },
     { label: "地点", value: `${structured.origin} → ${structured.destination}` },
     { label: "时间", value: `${formatDisplayDate(structured.startDate)} - ${formatDisplayDate(structured.endDate)}` },
-    { label: "偏好", value: structured.preferences || "待补充" },
+    { label: "偏好", value: structured.preferences || preferenceSummary(travelPreferences) || "待补充" },
   ];
   return (
     <View style={styles.preview}>

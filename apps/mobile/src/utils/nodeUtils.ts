@@ -15,8 +15,9 @@ export function resolveNodeType(item: ItineraryItem): NodeKind {
   return "soft_task";
 }
 
-export function isEditableNode(_item: ItineraryItem) {
-  return true;
+export function isEditableNode(item: ItineraryItem) {
+  if (item.editable === false) return false;
+  return resolveNodeType(item) !== "hard_anchor";
 }
 
 export const TIME_SLOTS = ["08:30", "11:30", "14:00", "16:30", "19:00"];

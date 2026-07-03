@@ -21,6 +21,10 @@ from app.models.schemas import (
     PrepareOrderRequest,
     RefinementRequest,
     RescheduleNodeRequest,
+    DeleteNodeRequest,
+    ReorderNodesRequest,
+    SmartUpdateNodeRequest,
+    SmartUpdateNodeResponse,
     UpdateNodeRequest,
     ReplanRequest,
     SystemSyncRequest,
@@ -29,6 +33,10 @@ from app.models.schemas import (
     UploadResponse,
     VoiceTranscribeResponse,
     VoiceTranscribeJsonRequest,
+    RecommendPOIRequest,
+    RecommendPOIResponse,
+    ConfirmPOIRequest,
+    ItineraryPriceQuote,
 )
 from app.agent.intent import intent_extractor
 from app.services.intent_analysis import intent_analysis_service
@@ -40,7 +48,9 @@ from app.services.poster_features import (
     system_sync_service,
     trip_review_service,
 )
+from app.services.price_engine import price_engine
 from app.services.rag import rag_service
+from app.services.recommendation_service import recommendation_service
 from app.services.speech import speech_service
 from app.services.store import store
 from app.tools.travel_tools import travel_tools
@@ -102,7 +112,10 @@ def analyze_intent(request: IntentParseRequest) -> IntentAnalyzeResponse:
 @app.post("/voice/transcribe", response_model=VoiceTranscribeResponse)
 async def transcribe_voice(file: UploadFile = File(...)) -> VoiceTranscribeResponse:
     if not speech_service.configured:
-        raise HTTPException(status_code=503, detail="语音识别未配置 DASHSCOPE_API_KEY")
+        raise HTTPException(
+            status_code=503,
+            detail="语音识别未配置。请设置 BAIDU_ASR_API_KEY/SECRET_KEY 或 DASHSCOPE_API_KEY",
+        )
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="empty audio file")
@@ -116,7 +129,10 @@ async def transcribe_voice(file: UploadFile = File(...)) -> VoiceTranscribeRespo
 @app.post("/voice/transcribe-base64", response_model=VoiceTranscribeResponse)
 async def transcribe_voice_base64(request: VoiceTranscribeJsonRequest) -> VoiceTranscribeResponse:
     if not speech_service.configured:
-        raise HTTPException(status_code=503, detail="语音识别未配置 DASHSCOPE_API_KEY")
+        raise HTTPException(
+            status_code=503,
+            detail="语音识别未配置。请设置 BAIDU_ASR_API_KEY/SECRET_KEY 或 DASHSCOPE_API_KEY",
+        )
     try:
         file_bytes = base64.b64decode(request.audio_base64)
     except Exception as error:
@@ -167,6 +183,55 @@ def update_node(request: UpdateNodeRequest) -> dict[str, object]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"itinerary": itinerary}
+
+
+@app.post("/itineraries/smart-update-node", response_model=SmartUpdateNodeResponse)
+def smart_update_node(request: SmartUpdateNodeRequest) -> SmartUpdateNodeResponse:
+    try:
+        return itinerary_refiner.smart_update_node(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/itineraries/delete-node", response_model=SmartUpdateNodeResponse)
+def delete_node(request: DeleteNodeRequest) -> SmartUpdateNodeResponse:
+    try:
+        return itinerary_refiner.delete_node(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/itineraries/reorder-nodes", response_model=SmartUpdateNodeResponse)
+def reorder_nodes(request: ReorderNodesRequest) -> SmartUpdateNodeResponse:
+    try:
+        return itinerary_refiner.reorder_nodes(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/recommendations/search", response_model=RecommendPOIResponse)
+def search_recommendations(request: RecommendPOIRequest) -> RecommendPOIResponse:
+    if not request.city.strip() or not request.keyword.strip():
+        raise HTTPException(status_code=400, detail="city and keyword are required")
+    return recommendation_service.recommend(request)
+
+
+@app.post("/nodes/confirm-poi")
+def confirm_poi(request: ConfirmPOIRequest) -> dict[str, object]:
+    try:
+        itinerary = recommendation_service.confirm_selection(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    quote = price_engine.quote_itinerary(itinerary)
+    return {"itinerary": itinerary, "price_quote": quote}
+
+
+@app.get("/itineraries/{itinerary_id}/price-quote", response_model=ItineraryPriceQuote)
+def get_price_quote(itinerary_id: str) -> ItineraryPriceQuote:
+    itinerary = store.get_itinerary(itinerary_id)
+    if itinerary is None:
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    return price_engine.quote_itinerary(itinerary)
 
 
 @app.get("/itineraries/{itinerary_id}")

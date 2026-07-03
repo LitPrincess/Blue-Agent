@@ -7,11 +7,5 @@
     "dev:mobile": "npm --prefix apps/mobile run start",
     "lint:api": "py -3.13 -m compileall apps/api/app",
     "lint:mobile": "npm --prefix apps/mobile run typecheck"
-  },
-  "workspaces": [
-    "apps/mobile"
-  ],
-  "dependencies": {
-    "expo-audio": "~57.0.0"
   }
 }

@@ -5,38 +5,48 @@ import * as DocumentPicker from "expo-document-picker";
 import { AgentStatus } from "../components/AgentStatus";
 import { IntentAnalysisPanel } from "../components/IntentAnalysisPanel";
 import { IntentInputPanel, UploadedFile } from "../components/IntentInputPanel";
-import { ItineraryCard } from "../components/ItineraryCard";
 import { MapTopologyBoard } from "../components/MapTopologyBoard";
+import { ItineraryTimeline } from "../components/ItineraryTimeline";
 import { draftFromItem, NodeEditDraft, NodeEditModal } from "../components/NodeEditModal";
+import { OptionPickerModal } from "../components/OptionPickerModal";
 import {
   acceptReplan,
   analyzeIntent,
   authorizePayment,
   buildTravelRequest,
   comparePlans,
+  confirmPOI,
+  deleteNode,
   executeOrder,
   getGuardianStatus,
+  getPriceQuote,
   getTripReview,
   prepareOrder,
+  reorderNodes,
   requestReplan,
-  updateNode,
+  searchRecommendations,
+  smartUpdateNode,
   simulateIncident,
   syncSystem,
   uploadTravelDocument,
 } from "../services/api";
+import { formatItemDateLabel } from "../utils/dateUtils";
 import {
   GuardianStatus,
   IntentAnalysis,
   Itinerary,
   ItineraryItem,
+  ItineraryPriceQuote,
   PlanComparison,
   PlanOption,
+  POICandidate,
   ReplanProposal,
   SystemSyncResult,
   TravelOrder,
   TripReview,
 } from "../types";
 import { buildEffectiveMessage, defaultStructured, parseTravelFromText, StructuredFields } from "../utils/parseTravelInput";
+import { defaultTravelPreferences, TravelPreferences } from "../utils/travelPreferences";
 
 const samplePrompt = "";
 const screenWidth = Dimensions.get("window").width;
@@ -44,19 +54,42 @@ const screenWidth = Dimensions.get("window").width;
 type Stage = "input" | "analyze" | "compare" | "order" | "guardian" | "review";
 
 const stageMeta: Array<{ id: Stage; title: string; subtitle: string }> = [
-  { id: "input", title: "D1 需求输入", subtitle: "多模态理解" },
+  { id: "input", title: "D1 意图爆发", subtitle: "多模态输入" },
   { id: "analyze", title: "D1 解析确认", subtitle: "五要素理解" },
-  { id: "compare", title: "D2 方案比对", subtitle: "路线与预算" },
-  { id: "order", title: "D3 确认订票", subtitle: "授权执行" },
-  { id: "guardian", title: "D4 动态守护", subtitle: "异常重规划" },
+  { id: "compare", title: "D2 视觉转译", subtitle: "拓扑方案" },
+  { id: "order", title: "D3 跨端执行", subtitle: "参数化跳转" },
+  { id: "guardian", title: "D4 动态微调", subtitle: "异常重规划" },
   { id: "review", title: "D5 回顾沉淀", subtitle: "记忆同步" },
 ];
+
+const stageFlow = ["Input", "Perception", "Topology", "Linkage", "Guardian"];
+
+function topologyStats(itinerary: Itinerary) {
+  return itinerary.items.reduce(
+    (stats, item) => {
+      const type =
+        item.node_type ??
+        (item.category === "transport" || item.category === "meeting" || item.category === "hotel"
+          ? "hard_anchor"
+          : item.category === "food" || item.category === "sight"
+            ? "semi_anchor"
+            : "soft_task");
+      if (type === "hard_anchor") stats.hard += 1;
+      if (type === "semi_anchor") stats.semi += 1;
+      if (type === "soft_task") stats.soft += 1;
+      stats.risks += item.risk_flags.length;
+      return stats;
+    },
+    { hard: 0, semi: 0, soft: 0, risks: 0 },
+  );
+}
 
 export function TravelDirectorScreen() {
   const [stage, setStage] = useState<Stage>("input");
   const [message, setMessage] = useState(samplePrompt);
   const [structured, setStructured] = useState<StructuredFields>(defaultStructured());
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [travelPreferences, setTravelPreferences] = useState<TravelPreferences>(defaultTravelPreferences);
   const [uploads, setUploads] = useState<UploadedFile[]>([]);
   const [loading, setLoading] = useState(false);
   const [pageScrollEnabled, setPageScrollEnabled] = useState(true);
@@ -74,6 +107,42 @@ export function TravelDirectorScreen() {
   const [proposal, setProposal] = useState<ReplanProposal | null>(null);
   const [review, setReview] = useState<TripReview | null>(null);
   const [analysis, setAnalysis] = useState<IntentAnalysis | null>(null);
+  const [priceQuote, setPriceQuote] = useState<ItineraryPriceQuote | null>(null);
+  const [poiPickerVisible, setPoiPickerVisible] = useState(false);
+  const [poiLoading, setPoiLoading] = useState(false);
+  const [poiCandidates, setPoiCandidates] = useState<POICandidate[]>([]);
+  const [poiSummary, setPoiSummary] = useState("");
+  const [poiRecommendation, setPoiRecommendation] = useState("");
+  const [poiPickerTitle, setPoiPickerTitle] = useState("多平台候选");
+  const [poiContext, setPoiContext] = useState<{
+    category: "food" | "hotel";
+    keyword: string;
+    day: number;
+    start_time: string;
+    end_time: string;
+    replace_item_id?: string;
+    insert_after_item_id?: string;
+    near_lat?: number;
+    near_lng?: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!itinerary?.id) {
+      setPriceQuote(null);
+      return;
+    }
+    let cancelled = false;
+    getPriceQuote(itinerary.id)
+      .then((quote) => {
+        if (!cancelled) setPriceQuote(quote);
+      })
+      .catch(() => {
+        if (!cancelled) setPriceQuote(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [itinerary?.id, itinerary?.version, itinerary?.items.length]);
 
   useEffect(() => {
     const hints = parseTravelFromText(message);
@@ -81,6 +150,129 @@ export function TravelDirectorScreen() {
       setSelectedTags((current) => Array.from(new Set([...current, ...hints.tags])));
     }
   }, [message]);
+
+  function extractFoodKeyword(text: string) {
+    const patterns = ["菌子火锅", "火锅", "烧烤", "米线", "小吃", "美食", "餐厅"];
+    for (const pattern of patterns) {
+      if (text.includes(pattern)) return pattern;
+    }
+    return "特色美食";
+  }
+
+  function keywordLabel(keyword: string) {
+    return keyword || "当地精选";
+  }
+
+  async function openPOIPicker(context: {
+    category: "food" | "hotel";
+    keyword: string;
+    day: number;
+    start_time: string;
+    end_time: string;
+    replace_item_id?: string;
+    insert_after_item_id?: string;
+    near_lat?: number;
+    near_lng?: number;
+  }) {
+    if (!itinerary) return;
+    const city = itinerary.intent.destination || structured.destination;
+    if (!city) {
+      Alert.alert("缺少目的地", "请先填写或解析目的地城市。");
+      return;
+    }
+    setPoiContext(context);
+    setPoiPickerTitle(
+      context.category === "hotel"
+        ? `推荐酒店 · ${keywordLabel(context.keyword)}`
+        : `推荐餐厅 · ${keywordLabel(context.keyword)}`,
+    );
+    setPoiPickerVisible(true);
+    setPoiLoading(true);
+    setPoiCandidates([]);
+    try {
+      const response = await searchRecommendations({
+        city,
+        keyword: context.keyword,
+        category: context.category,
+        day: context.day,
+        start_time: context.start_time,
+        end_time: context.end_time,
+        near_lat: context.near_lat,
+        near_lng: context.near_lng,
+        itinerary_id: itinerary.id,
+      });
+      setPoiCandidates(response.candidates);
+      setPoiSummary(response.summary);
+      setPoiRecommendation(response.llm_recommendation);
+    } catch (error) {
+      setPoiPickerVisible(false);
+      Alert.alert("推荐失败", error instanceof Error ? error.message : "请确认后端已启动");
+    } finally {
+      setPoiLoading(false);
+    }
+  }
+
+  function handleRecommendFromItem(item: ItineraryItem) {
+    const category = item.category === "hotel" ? "hotel" : "food";
+    const keyword =
+      category === "hotel"
+        ? itinerary?.intent.accommodation_area || `${itinerary?.intent.destination || structured.destination}酒店`
+        : extractFoodKeyword(item.title) !== "特色美食"
+          ? extractFoodKeyword(item.title)
+          : extractFoodKeyword(message);
+    openPOIPicker({
+      category,
+      keyword,
+      day: item.day,
+      start_time: item.start_time,
+      end_time: item.end_time,
+      replace_item_id: item.id,
+      near_lat: item.geo_lat ?? undefined,
+      near_lng: item.geo_lng ?? undefined,
+    });
+  }
+
+  async function handleConfirmPOI(candidate: POICandidate) {
+    if (!itinerary || !poiContext) return;
+    setPoiLoading(true);
+    try {
+      const response = await confirmPOI(itinerary.id, candidate, {
+        day: poiContext.day,
+        start_time: poiContext.start_time,
+        end_time: poiContext.end_time,
+        replace_item_id: poiContext.replace_item_id,
+        insert_after_item_id: poiContext.insert_after_item_id,
+      });
+      if (response.itinerary) await applyItineraryUpdate(response.itinerary);
+      setPriceQuote(response.price_quote);
+      setPoiPickerVisible(false);
+      setPoiContext(null);
+      Alert.alert("节点已确定", `已选定「${candidate.name}」，总价更新为 ¥${response.price_quote.total}。`);
+    } catch (error) {
+      Alert.alert("确认失败", error instanceof Error ? error.message : "请稍后重试");
+    } finally {
+      setPoiLoading(false);
+    }
+  }
+
+  function handleQuickRecommend(category: "food" | "hotel") {
+    if (!itinerary) return;
+    const lastItem = itinerary.items[itinerary.items.length - 1];
+    const keyword =
+      category === "food"
+        ? extractFoodKeyword(message)
+        : itinerary.intent.accommodation_area || `${itinerary.intent.destination || structured.destination}酒店`;
+    openPOIPicker({
+      category,
+      keyword,
+      day: lastItem?.day ?? 1,
+      start_time: category === "food" ? "12:00" : "20:00",
+      end_time: category === "food" ? "13:30" : "08:00",
+      insert_after_item_id: lastItem?.id,
+      near_lat: lastItem?.geo_lat ?? undefined,
+      near_lng: lastItem?.geo_lng ?? undefined,
+    });
+  }
 
   const subtitle = loading
     ? "Agent 正在执行当前阶段"
@@ -90,9 +282,6 @@ export function TravelDirectorScreen() {
         ? `${comparison.options.length} 个候选方案已生成`
         : "多模态输入 · 方案比对 · 跨端执行 · 动态守护";
 
-  function toggleTag(tag: string) {
-    setSelectedTags((current) => (current.includes(tag) ? current.filter((item) => item !== tag) : [...current, tag]));
-  }
 
   async function handleUpload() {
     const result = await DocumentPicker.getDocumentAsync({
@@ -124,7 +313,7 @@ export function TravelDirectorScreen() {
   }
 
   async function handleAnalyze() {
-    const effectiveMessage = buildEffectiveMessage(message, structured, selectedTags);
+    const effectiveMessage = buildEffectiveMessage(message, structured, selectedTags, travelPreferences);
     if (!effectiveMessage) {
       Alert.alert("请先输入需求", "可通过文字、语音，或填写出发地/目的地后解析。");
       return;
@@ -151,7 +340,7 @@ export function TravelDirectorScreen() {
   }
 
   async function handleCompare() {
-    const effectiveMessage = buildEffectiveMessage(message, structured, selectedTags);
+    const effectiveMessage = buildEffectiveMessage(message, structured, selectedTags, travelPreferences);
     if (!effectiveMessage) {
       Alert.alert("请先输入需求", "可通过文字、语音，或填写出发地/目的地后解析。");
       return;
@@ -159,7 +348,9 @@ export function TravelDirectorScreen() {
     if (!message.trim()) setMessage(effectiveMessage);
     setLoading(true);
     try {
-      const response = await comparePlans(buildTravelRequest(effectiveMessage, structured, documentIds, selectedTags));
+      const response = await comparePlans(
+        buildTravelRequest(effectiveMessage, structured, documentIds, selectedTags, [], travelPreferences),
+      );
       setComparison(response.comparison);
       const recommended =
         response.comparison.options.find((item) => item.id === response.comparison.recommended_option_id) ??
@@ -252,25 +443,43 @@ export function TravelDirectorScreen() {
     }
   }
 
-  async function handleUpdateNode(itemId: string, payload: Parameters<typeof updateNode>[2]) {
-    if (!itinerary) return;
-    const response = await updateNode(itinerary.id, itemId, payload);
-    if (response.itinerary) {
-      setItinerary(response.itinerary);
-      if (selectedOption) {
-        setSelectedOption({ ...selectedOption, itinerary: response.itinerary });
-      }
-      if (comparison) {
-        setComparison({
-          ...comparison,
-          options: comparison.options.map((option) =>
-            option.itinerary.id === response.itinerary?.id
-              ? { ...option, itinerary: response.itinerary! }
-              : option,
-          ),
-        });
-      }
+  async function applyItineraryUpdate(itinerary: Itinerary) {
+    setItinerary(itinerary);
+    if (selectedOption) {
+      setSelectedOption({ ...selectedOption, itinerary });
     }
+    if (comparison) {
+      setComparison({
+        ...comparison,
+        options: comparison.options.map((option) =>
+          option.itinerary.id === itinerary.id ? { ...option, itinerary } : option,
+        ),
+      });
+    }
+  }
+
+  async function handleSmartUpdateNode(
+    itemId: string,
+    payload: Parameters<typeof smartUpdateNode>[2],
+    instruction?: string,
+    options?: { silent?: boolean },
+  ) {
+    if (!itinerary) return null;
+    const response = await smartUpdateNode(itinerary.id, itemId, payload, instruction);
+    if (response.itinerary) {
+      await applyItineraryUpdate(response.itinerary);
+    }
+    if (!options?.silent) {
+      const affected = response.affected_item_ids?.length ?? 0;
+      const warningText = response.warnings?.length
+        ? `\n\n⚠ ${response.warnings.join("；")}`
+        : "";
+      Alert.alert(
+        "智能联动完成",
+        `${response.change_summary || "行程已更新。"}\n\n共联动 ${affected} 个节点。${warningText}`,
+      );
+    }
+    return response;
   }
 
   function handleEditNode(item: ItineraryItem) {
@@ -281,15 +490,75 @@ export function TravelDirectorScreen() {
     if (!nodeEditDraft) return;
     setNodeSaving(true);
     try {
-      await handleUpdateNode(nodeEditDraft.id, {
-        title: nodeEditDraft.title.trim(),
-        start_time: nodeEditDraft.start_time.trim(),
-        location: nodeEditDraft.location.trim(),
-      });
+      const response = await handleSmartUpdateNode(
+        nodeEditDraft.id,
+        {
+          title: nodeEditDraft.title.trim(),
+          start_time: nodeEditDraft.start_time.trim(),
+          location: nodeEditDraft.location.trim(),
+        },
+        "请联动检查同日后续节点时间、交通缓冲与地点描述是否需要同步调整。",
+        { silent: true },
+      );
       setNodeEditDraft(null);
-      Alert.alert("节点已更新", "修改已同步到行程与地图。");
+      const affected = response?.affected_item_ids?.length ?? 0;
+      Alert.alert(
+        "智能联动完成",
+        `${response?.change_summary || "修改已同步到行程与地图。"}\n\n共联动 ${affected} 个节点。`,
+      );
     } catch (error) {
       Alert.alert("保存失败", error instanceof Error ? error.message : "请稍后重试");
+    } finally {
+      setNodeSaving(false);
+    }
+  }
+
+  async function handleDeleteNodeEdit() {
+    if (!nodeEditDraft || !itinerary) return;
+    const title = nodeEditDraft.title.trim();
+    Alert.alert("确认删除", `确定删除「${title}」？Agent 将联动调整剩余行程。`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "删除",
+        style: "destructive",
+        onPress: async () => {
+          setNodeSaving(true);
+          try {
+            const response = await deleteNode(itinerary.id, nodeEditDraft.id);
+            if (response.itinerary) await applyItineraryUpdate(response.itinerary);
+            setNodeEditDraft(null);
+            Alert.alert("已删除", response.change_summary || "节点已删除。");
+          } catch (error) {
+            Alert.alert("删除失败", error instanceof Error ? error.message : "请稍后重试");
+          } finally {
+            setNodeSaving(false);
+          }
+        },
+      },
+    ]);
+  }
+
+  async function handleMoveNode(itemId: string, direction: "up" | "down") {
+    if (!itinerary) return;
+    const index = itinerary.items.findIndex((item) => item.id === itemId);
+    if (index < 0) return;
+    const targetIndex = direction === "up" ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= itinerary.items.length) return;
+
+    const itemIds = itinerary.items.map((item) => item.id);
+    [itemIds[index], itemIds[targetIndex]] = [itemIds[targetIndex], itemIds[index]];
+
+    setNodeSaving(true);
+    try {
+      const response = await reorderNodes(itinerary.id, itemIds);
+      if (response.itinerary) await applyItineraryUpdate(response.itinerary);
+      const affected = response.affected_item_ids?.length ?? 0;
+      Alert.alert(
+        "顺序已更新",
+        `${response.change_summary || "节点顺序已调整。"}${affected ? `\n\n共联动 ${affected} 个节点。` : ""}`,
+      );
+    } catch (error) {
+      Alert.alert("调整失败", error instanceof Error ? error.message : "请稍后重试");
     } finally {
       setNodeSaving(false);
     }
@@ -330,9 +599,18 @@ export function TravelDirectorScreen() {
                 <Text style={styles.titleBadge}>AIGC Agent</Text>
               </View>
               <Text style={styles.subheading} numberOfLines={2}>
-                需求输入 · 方案比对 · 跨端执行 · 动态守护
+                意图爆发 · 视觉转译 · 动态微调 · 跨端执行
               </Text>
             </View>
+          </View>
+
+          <View style={styles.flowRail}>
+            {stageFlow.map((item, index) => (
+              <View key={item} style={styles.flowStep}>
+                <Text style={styles.flowIndex}>{index + 1}</Text>
+                <Text style={styles.flowText}>{item}</Text>
+              </View>
+            ))}
           </View>
 
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.stageTabs}>
@@ -354,8 +632,8 @@ export function TravelDirectorScreen() {
                 onMessageChange={setMessage}
                 structured={structured}
                 setStructured={setStructured}
-                selectedTags={selectedTags}
-                onToggleTag={toggleTag}
+                travelPreferences={travelPreferences}
+                onTravelPreferencesChange={setTravelPreferences}
                 uploads={uploads}
                 onUploadPress={handleUpload}
                 onAnalyze={handleAnalyze}
@@ -377,7 +655,7 @@ export function TravelDirectorScreen() {
 
           {stage === "compare" ? (
             <View style={styles.section}>
-              <Text style={styles.sectionTitle}>方案比对</Text>
+              <Text style={styles.sectionTitle}>视觉转译 · 候选拓扑</Text>
               {comparison?.options.map((option) => (
                 <Pressable key={option.id} style={[styles.optionCard, selectedOption?.id === option.id ? styles.optionCardActive : null]} onPress={() => handlePrepare(option)}>
                   <View style={styles.optionHeader}>
@@ -398,7 +676,7 @@ export function TravelDirectorScreen() {
 
           {stage === "order" ? (
             <View style={styles.section}>
-              <Text style={styles.sectionTitle}>确认订单与后台执行</Text>
+              <Text style={styles.sectionTitle}>跨端执行 · 参数化动作</Text>
               {order ? (
                 <>
                   <View style={styles.summaryCard}>
@@ -426,7 +704,7 @@ export function TravelDirectorScreen() {
 
           {stage === "guardian" ? (
             <View style={styles.section}>
-              <Text style={styles.sectionTitle}>动态守护与系统同步</Text>
+              <Text style={styles.sectionTitle}>动态微调 · 守护重排</Text>
               {syncResult ? (
                 <View style={styles.entityGrid}>
                   {syncResult.items.map((item) => (
@@ -480,29 +758,134 @@ export function TravelDirectorScreen() {
           {itinerary ? (
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>时空拓扑看板</Text>
+              <TopologySummary itinerary={itinerary} />
+              {priceQuote ? (
+                <View style={styles.priceCard}>
+                  <Text style={styles.priceCardTitle}>真实费用估算</Text>
+                  <Text style={styles.priceTotal}>¥{priceQuote.total}</Text>
+                  <View style={styles.priceMetrics}>
+                    <Text style={styles.priceMetric}>交通 ¥{priceQuote.transport}</Text>
+                    <Text style={styles.priceMetric}>餐饮 ¥{priceQuote.food}</Text>
+                    <Text style={styles.priceMetric}>住宿 ¥{priceQuote.hotel}</Text>
+                  </View>
+                  <Text style={styles.priceSource}>
+                    路线来源：{priceQuote.data_sources.join("、") || "估算"} · 市内耗时 {priceQuote.duration_text}
+                  </Text>
+                </View>
+              ) : null}
+              <View style={styles.quickPickRow}>
+                <Pressable style={styles.quickPickBtn} disabled={loading || poiLoading} onPress={() => handleQuickRecommend("food")}>
+                  <Text style={styles.quickPickText}>推荐美食</Text>
+                </Pressable>
+                <Pressable style={styles.quickPickBtn} disabled={loading || poiLoading} onPress={() => handleQuickRecommend("hotel")}>
+                  <Text style={styles.quickPickText}>推荐酒店</Text>
+                </Pressable>
+              </View>
               <MapTopologyBoard
                 itinerary={itinerary}
                 city={structured.destination}
-                onUpdateNode={handleUpdateNode}
+                startDate={itinerary.intent.start_date ?? structured.startDate}
+                onUpdateNode={async (itemId, payload) => {
+                  const item = itinerary.items.find((entry) => entry.id === itemId);
+                  const instruction = item
+                    ? `用户拖动了「${item.title}」的地图位置，请检查地点描述与后续交通时间是否需要联动调整。`
+                    : undefined;
+                  await handleSmartUpdateNode(itemId, payload, instruction, { silent: true });
+                }}
                 onEditItem={handleEditNode}
                 onMapInteractionChange={handleMapInteraction}
               />
-              {itinerary.items.map((item, index) => (
-                <ItineraryCard key={item.id} item={item} index={index} onEdit={handleEditNode} />
-              ))}
+              <ItineraryTimeline
+                items={itinerary.items}
+                startDate={itinerary.intent.start_date ?? structured.startDate}
+                busy={nodeSaving || poiLoading}
+                onEdit={handleEditNode}
+                onRecommendPOI={handleRecommendFromItem}
+                onMoveUp={(itemId) => handleMoveNode(itemId, "up")}
+                onMoveDown={(itemId) => handleMoveNode(itemId, "down")}
+                onDelete={(itemId) => {
+                  const item = itinerary.items.find((entry) => entry.id === itemId);
+                  if (!item) return;
+                  Alert.alert("确认删除", `确定删除「${item.title}」？`, [
+                    { text: "取消", style: "cancel" },
+                    {
+                      text: "删除",
+                      style: "destructive",
+                      onPress: async () => {
+                        setNodeSaving(true);
+                        try {
+                          const response = await deleteNode(itinerary.id, itemId);
+                          if (response.itinerary) await applyItineraryUpdate(response.itinerary);
+                          Alert.alert("已删除", response.change_summary || "节点已删除。");
+                        } catch (error) {
+                          Alert.alert("删除失败", error instanceof Error ? error.message : "请稍后重试");
+                        } finally {
+                          setNodeSaving(false);
+                        }
+                      },
+                    },
+                  ]);
+                }}
+              />
               <NodeEditModal
                 visible={nodeEditDraft != null}
                 draft={nodeEditDraft}
+                dateLabel={
+                  nodeEditDraft
+                    ? formatItemDateLabel(
+                        itinerary.intent.start_date ?? structured.startDate,
+                        itinerary.items.find((item) => item.id === nodeEditDraft.id)?.day ?? 1,
+                      )
+                    : undefined
+                }
                 saving={nodeSaving}
                 onChange={setNodeEditDraft}
                 onClose={() => setNodeEditDraft(null)}
                 onSave={handleSaveNodeEdit}
+                onDelete={handleDeleteNodeEdit}
+              />
+              <OptionPickerModal
+                visible={poiPickerVisible}
+                title={poiPickerTitle}
+                summary={poiSummary}
+                recommendation={poiRecommendation}
+                candidates={poiCandidates}
+                loading={poiLoading}
+                onClose={() => {
+                  setPoiPickerVisible(false);
+                  setPoiContext(null);
+                }}
+                onConfirm={handleConfirmPOI}
               />
             </View>
           ) : null}
         </View>
       </View>
     </ScrollView>
+  );
+}
+
+function TopologySummary({ itinerary }: { itinerary: Itinerary }) {
+  const stats = topologyStats(itinerary);
+  const chips = [
+    { label: "硬锚点", value: `${stats.hard}`, tone: "blue" },
+    { label: "半硬锚点", value: `${stats.semi}`, tone: "cyan" },
+    { label: "软任务", value: `${stats.soft}`, tone: "soft" },
+    { label: "风险", value: `${stats.risks}`, tone: stats.risks ? "warn" : "soft" },
+  ];
+  return (
+    <View style={styles.topologySummary}>
+      <Text style={styles.topologyTitle} numberOfLines={2}>{itinerary.title}</Text>
+      <Text style={styles.topologyCopy} numberOfLines={3}>{itinerary.summary || itinerary.explanation}</Text>
+      <View style={styles.topologyChips}>
+        {chips.map((chip) => (
+          <View key={chip.label} style={[styles.topologyChip, chip.tone === "warn" && styles.topologyChipWarn]}>
+            <Text style={styles.topologyChipValue}>{chip.value}</Text>
+            <Text style={styles.topologyChipLabel}>{chip.label}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
   );
 }
 
@@ -529,6 +912,29 @@ const styles = StyleSheet.create({
   stageTitle: { marginTop: 7, color: "#527099", fontSize: 11, fontWeight: "900" },
   stageTitleActive: { color: "#287CFF" },
   stageSub: { marginTop: 3, color: "#8BA0BD", fontSize: 9, fontWeight: "800" },
+  flowRail: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 12 },
+  flowStep: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.76)",
+  },
+  flowIndex: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    overflow: "hidden",
+    textAlign: "center",
+    textAlignVertical: "center",
+    color: "#FFFFFF",
+    backgroundColor: "#287CFF",
+    fontSize: 9,
+    fontWeight: "900",
+  },
+  flowText: { color: "#527099", fontSize: 9, fontWeight: "900" },
   section: { marginTop: 12, padding: 12, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.9)" },
   sectionTitle: { color: "#233B63", fontSize: 14, fontWeight: "900", marginBottom: 10 },
   cta: { minHeight: 48, marginTop: 14, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: "#1B63FF" },
@@ -554,4 +960,53 @@ const styles = StyleSheet.create({
   entityPill: { width: "48%", padding: 9, borderRadius: 12, backgroundColor: "#FFFFFF" },
   entityLabel: { color: "#287CFF", fontSize: 10, fontWeight: "900" },
   entityValue: { marginTop: 4, color: "#7085A2", fontSize: 11, lineHeight: 15 },
+  topologySummary: { gap: 8, padding: 12, borderRadius: 14, backgroundColor: "#F7FBFF", marginBottom: 10 },
+  topologyTitle: { color: "#233B63", fontSize: 13, fontWeight: "900" },
+  topologyCopy: { color: "#7085A2", fontSize: 11, lineHeight: 16, fontWeight: "800" },
+  topologyChips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  topologyChip: {
+    minWidth: 62,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: "#FFFFFF",
+  },
+  topologyChipWarn: { backgroundColor: "#FFF7ED" },
+  topologyChipValue: { color: "#287CFF", fontSize: 15, fontWeight: "900" },
+  topologyChipLabel: { marginTop: 2, color: "#7F93B1", fontSize: 9, fontWeight: "900" },
+  priceCard: {
+    marginBottom: 10,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#D8E6FF",
+    gap: 6,
+  },
+  priceCardTitle: { color: "#30496F", fontSize: 12, fontWeight: "900" },
+  priceTotal: { color: "#1B63FF", fontSize: 24, fontWeight: "900" },
+  priceMetrics: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  priceMetric: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: "#EEF6FF",
+    color: "#527099",
+    fontSize: 10,
+    fontWeight: "900",
+    overflow: "hidden",
+  },
+  priceSource: { color: "#8BA0BD", fontSize: 10, lineHeight: 15 },
+  quickPickRow: { flexDirection: "row", gap: 8, marginBottom: 10 },
+  quickPickBtn: {
+    flex: 1,
+    minHeight: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#E8FFF3",
+    borderWidth: 1,
+    borderColor: "#B8EBD0",
+  },
+  quickPickText: { color: "#1A9D5C", fontSize: 12, fontWeight: "900" },
 });

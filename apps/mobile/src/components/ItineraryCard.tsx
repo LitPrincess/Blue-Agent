@@ -1,7 +1,8 @@
 import { Pressable, View, Text, StyleSheet } from "react-native";
 
 import { ItineraryItem } from "../types";
-import { formatDurationLabel, formatTimeRange } from "../utils/durationUtils";
+import { formatItemDateLabel, formatItemSchedule } from "../utils/dateUtils";
+import { formatDurationLabel } from "../utils/durationUtils";
 import { nodeVisual, resolveNodeType } from "../utils/nodeUtils";
 
 const categoryLabel: Record<ItineraryItem["category"], string> = {
@@ -17,19 +18,23 @@ const categoryLabel: Record<ItineraryItem["category"], string> = {
 export function ItineraryCard({
   item,
   index,
+  startDate,
   onEdit,
 }: {
   item: ItineraryItem;
   index: number;
+  startDate?: string | null;
   onEdit?: (item: ItineraryItem) => void;
 }) {
   const kind = resolveNodeType(item);
   const visual = nodeVisual[kind] ?? nodeVisual.soft_task;
+  const dateLabel = formatItemDateLabel(startDate, item.day);
+  const schedule = formatItemSchedule(startDate, item.day, item.start_time, item.end_time);
 
   return (
     <Pressable style={[styles.card, { borderColor: visual.border }]} onPress={() => onEdit?.(item)}>
       <View style={[styles.taskTime, { backgroundColor: visual.border }]}>
-        <Text style={styles.day}>D{item.day}</Text>
+        <Text style={styles.day}>{dateLabel}</Text>
         <Text style={styles.time}>{item.start_time}</Text>
       </View>
       <View style={styles.content}>
@@ -38,8 +43,10 @@ export function ItineraryCard({
           <Text style={styles.badge}>{categoryLabel[item.category]}</Text>
         </View>
         <Text style={styles.nodeType}>
-          #{index + 1} {visual.icon} {visual.label} · {formatTimeRange(item.start_time, item.end_time)}
-          {formatDurationLabel(item.start_time, item.end_time) ? ` · ${formatDurationLabel(item.start_time, item.end_time)}` : ""}
+          #{index + 1} {visual.icon} {visual.label} · {schedule}
+          {formatDurationLabel(item.start_time, item.end_time)
+            ? ` · ${formatDurationLabel(item.start_time, item.end_time)}`
+            : ""}
         </Text>
         <Text style={styles.location}>{item.location}</Text>
         <Text style={styles.description}>{item.description}</Text>

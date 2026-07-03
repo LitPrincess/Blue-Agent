@@ -51,8 +51,12 @@ class IntentAnalysisService:
             preferences=intent.preferences or ["效率优先"],
         )
 
-        calendar_detail = "无日程冲突" if not conflicts else "；".join(
-            f"{item.get('title', '会议')} {item.get('start', '')}" for item in conflicts[:2]
+        calendar_detail = (
+            f"已关联出行日期 {intent.start_date or '待定'}"
+            f"{' 至 ' + intent.end_date if intent.end_date else ''}；"
+            + ("无日程冲突" if not conflicts else "；".join(
+                f"{item.get('title', '会议')} {item.get('time', '')}" for item in conflicts[:2]
+            ))
         )
         weather_detail = (
             f"{weather.get('summary', '多云')} {weather.get('temperature', '18~26℃')} "
