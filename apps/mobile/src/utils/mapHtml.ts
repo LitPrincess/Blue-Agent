@@ -1,8 +1,10 @@
-import { ItineraryItem } from "../types";
+import { ItemWeatherInfo, ItineraryItem } from "../types";
 import { formatItemDateLabel, formatItemSchedule } from "./dateUtils";
 import { formatDurationLabel, formatTimeRange } from "./durationUtils";
 import { resolveMapPoint } from "./geoCoords";
 import { isEditableNode, resolveNodeType } from "./nodeUtils";
+import { riskLevelForItem, riskTextForItem } from "./riskUtils";
+import { categoryEmojiForItem } from "./topologyVisual";
 
 export type MapMarkerPayload = {
   id: string;
@@ -19,11 +21,20 @@ export type MapMarkerPayload = {
   duration: string;
   location: string;
   nodeType: "hard_anchor" | "semi_anchor" | "soft_task";
+  riskLevel: "low" | "medium" | "high";
+  riskText: string;
   editable: boolean;
   draggable: boolean;
 };
 
 const MAP_BOOT = `
+  if (!window.ReactNativeWebView) {
+    window.ReactNativeWebView = {
+      postMessage: function(message) {
+        window.parent && window.parent.postMessage({ source: 'map-topology', payload: message }, '*');
+      }
+    };
+  }
   window.mapApi = {
     zoomIn: function() { if (window.__map) window.__map.zoomIn(); },
     zoomOut: function() { if (window.__map) window.__map.zoomOut(); },
@@ -40,6 +51,23 @@ const MAP_BOOT = `
   };
 `;
 
+const MAP_VIEW_HELPERS = `
+  function distanceFromCenter(item, center) {
+    const lngDiff = item.lng - center.lng;
+    const latDiff = item.lat - center.lat;
+    return Math.sqrt(lngDiff * lngDiff + latDiff * latDiff);
+  }
+  function displayMarkersForCity(markers, center) {
+    const localMarkers = markers.filter(function(item) {
+      return distanceFromCenter(item, center) < 1.8;
+    });
+    const visibleMarkers = localMarkers.length ? localMarkers : markers;
+    return visibleMarkers.map(function(item, index) {
+      return Object.assign({}, item, { index: index + 1 });
+    });
+  }
+`;
+
 export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], center: { lng: number; lat: number }) {
   const markerJson = JSON.stringify(markers);
   const centerJson = JSON.stringify(center);
@@ -51,7 +79,26 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes" />
   <style>
     html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; background: #e8f4ff; touch-action: none; }
-    .cartoon-marker { display: flex; flex-direction: column; align-items: center; width: 96px; cursor: grab; }
+    .cartoon-marker { display: flex; flex-direction: column; align-items: center; width: 132px; cursor: grab; }
+    .topo-meta {
+      align-self: flex-start; margin-left: 4px; margin-bottom: 3px;
+      color: #1b6fff; font-size: 9px; font-weight: 900;
+    }
+    .topo-card {
+      width: 100%; display: flex; align-items: center; gap: 8px;
+      padding: 7px 8px; border-radius: 12px; border: 1.5px solid #1b6fff;
+      background: rgba(255,255,255,0.96); box-shadow: 0 6px 14px rgba(27,111,255,0.16);
+    }
+    .semi_anchor .topo-card { border-color: #17bfd1; }
+    .soft_task .topo-card { border-color: #89b8ff; }
+    .risk_medium .topo-card, .risk_high .topo-card { border-color: #ef4444; box-shadow: 0 6px 14px rgba(239,68,68,0.22); }
+    .topo-icon {
+      width: 30px; height: 30px; border-radius: 9px; border: 1.5px solid #d7e8ff;
+      background: #eef4ff; display: flex; align-items: center; justify-content: center; font-size: 16px;
+    }
+    .topo-body { flex: 1; min-width: 0; }
+    .topo-title { color: #0f1b35; font-size: 10px; font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .topo-sub { color: #6b7a99; font-size: 8px; font-weight: 800; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .marker-bubble {
       width: 46px; height: 46px; border-radius: 18px;
       display: flex; align-items: center; justify-content: center;
@@ -61,6 +108,11 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
     .hard_anchor .marker-bubble { background: linear-gradient(135deg, #287cff, #1b63ff); transform: rotate(-4deg); }
     .semi_anchor .marker-bubble { background: linear-gradient(135deg, #17bfd1, #0ea5b7); }
     .soft_task .marker-bubble { background: linear-gradient(135deg, #89b8ff, #5b95ff); animation: float 2.4s ease-in-out infinite; }
+    .risk_medium .marker-bubble, .risk_high .marker-bubble {
+      background: linear-gradient(135deg, #ff6b6b, #ef4444);
+      box-shadow: 0 8px 20px rgba(239,68,68,0.34);
+    }
+    .risk_medium .marker-stem, .risk_high .marker-stem { background: #ef4444; }
     .marker-stem { width: 4px; height: 12px; background: #287cff; border-radius: 999px; margin-top: -2px; }
     .marker-index {
       position: absolute; top: -8px; left: -8px; min-width: 18px; height: 18px; padding: 0 4px;
@@ -78,6 +130,11 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
       background: #fff; color: #287cff; font-size: 9px; display: flex; align-items: center; justify-content: center;
       box-shadow: 0 2px 6px rgba(0,0,0,0.12);
     }
+    .risk-badge {
+      position: absolute; bottom: -7px; right: -7px; height: 16px; padding: 0 5px; border-radius: 8px;
+      background: #fff1f2; color: #e11d48; font-size: 9px; font-weight: 900;
+      display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 6px rgba(225,29,72,0.18);
+    }
     @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
   </style>
   <script src="https://webapi.amap.com/maps?v=2.0&key=${apiKey}"></script>
@@ -86,8 +143,10 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
   <div id="map"></div>
   <script>
     ${MAP_BOOT}
+    ${MAP_VIEW_HELPERS}
     const markers = ${markerJson};
     const center = ${centerJson};
+    const displayMarkers = displayMarkersForCity(markers, center);
     const map = new AMap.Map('map', {
       zoom: 12,
       center: [center.lng, center.lat],
@@ -105,30 +164,36 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
     });
     window.__map = map;
 
-    AMap.plugin(['AMap.ToolBar', 'AMap.Scale'], function() {
-      map.addControl(new AMap.ToolBar({ position: { top: '48px', right: '12px' } }));
+    AMap.plugin(['AMap.Scale'], function() {
       map.addControl(new AMap.Scale());
     });
 
     const markerInstances = [];
     const path = [];
 
-    markers.forEach(function(item) {
+    displayMarkers.forEach(function(item) {
       path.push([item.lng, item.lat]);
       const typeBadge = item.nodeType === 'hard_anchor' ? '<div class="badge">硬</div>' :
         item.nodeType === 'semi_anchor' ? '<div class="badge">半</div>' : '';
       const timeLabel = item.scheduleLabel + (item.duration ? ' · ' + item.duration : '');
-      const html = '<div class="cartoon-marker ' + item.nodeType + '">' +
-        '<div class="marker-bubble">' + item.icon + '<div class="marker-index">' + item.index + '</div>' + typeBadge + '</div>' +
-        '<div class="marker-stem"></div>' +
-        '<div class="marker-title">' + item.title + '</div>' +
-        '<div class="marker-time">' + timeLabel + '</div>' +
+      const riskClass = item.riskLevel === 'low' ? '' : ' risk_' + item.riskLevel;
+      const riskBadge = item.riskLevel === 'low' ? '' : '<div class="risk-badge">险</div>';
+      const html = '<div class="cartoon-marker ' + item.nodeType + riskClass + '">' +
+        '<div class="topo-meta">第' + item.index + '站 · ' + item.dateLabel + '</div>' +
+        '<div class="topo-card">' +
+          '<div class="topo-icon">' + item.icon + '</div>' +
+          '<div class="topo-body">' +
+            '<div class="topo-title">' + item.title + '</div>' +
+            '<div class="topo-sub">' + item.startTime + ' · ' + (item.location || '地点待定') + '</div>' +
+          '</div>' +
+        '</div>' +
+        riskBadge +
         '</div>';
 
       const marker = new AMap.Marker({
         position: [item.lng, item.lat],
         content: html,
-        offset: new AMap.Pixel(-48, -84),
+        offset: new AMap.Pixel(-66, -56),
         zIndex: item.nodeType === 'hard_anchor' ? 120 : 100,
         draggable: item.draggable,
         cursor: item.draggable ? 'move' : 'pointer',
@@ -169,6 +234,19 @@ export function buildAmapHtml(apiKey: string, markers: MapMarkerPayload[], cente
         lineCap: 'round',
         showDir: true,
       }).setMap(map);
+      for (let i = 0; i < displayMarkers.length - 1; i += 1) {
+        if (displayMarkers[i].riskLevel !== 'low' || displayMarkers[i + 1].riskLevel !== 'low') {
+          new AMap.Polyline({
+            path: [[displayMarkers[i].lng, displayMarkers[i].lat], [displayMarkers[i + 1].lng, displayMarkers[i + 1].lat]],
+            strokeColor: '#EF4444',
+            strokeWeight: 7,
+            strokeOpacity: 0.92,
+            lineJoin: 'round',
+            lineCap: 'round',
+            showDir: true,
+          }).setMap(map);
+        }
+      }
     }
 
     window.__fitMapOnce(map, markerInstances);
@@ -189,10 +267,29 @@ export function buildLeafletHtml(markers: MapMarkerPayload[], center: { lng: num
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; touch-action: none; }
-    .cartoon-pin { text-align: center; width: 96px; }
+    .cartoon-pin { text-align: center; width: 132px; }
+    .topo-meta { text-align: left; margin-left: 4px; margin-bottom: 3px; color: #1b6fff; font-size: 9px; font-weight: 900; }
+    .topo-card {
+      display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 12px;
+      border: 1.5px solid #1b6fff; background: rgba(255,255,255,0.96); box-shadow: 0 6px 14px rgba(27,111,255,0.16);
+    }
+    .cartoon-pin.risk .topo-card { border-color: #ef4444 !important; box-shadow: 0 6px 14px rgba(239,68,68,0.22); }
+    .topo-icon {
+      width: 30px; height: 30px; border-radius: 9px; border: 1.5px solid #d7e8ff; background: #eef4ff;
+      display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0;
+    }
+    .topo-body { flex: 1; min-width: 0; text-align: left; }
+    .topo-title { color: #0f1b35; font-size: 10px; font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .topo-sub { color: #6b7a99; font-size: 8px; font-weight: 800; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .cartoon-pin .bubble {
       width: 44px; height: 44px; border-radius: 16px; display: flex; align-items: center; justify-content: center;
       font-size: 22px; border: 3px solid #fff; box-shadow: 0 8px 16px rgba(40,124,255,0.25); margin: 0 auto; position: relative;
+    }
+    .cartoon-pin.risk .bubble { background: #ef4444 !important; box-shadow: 0 8px 18px rgba(239,68,68,0.32); }
+    .cartoon-pin .risk-badge {
+      position: absolute; bottom: -7px; right: -7px; height: 16px; padding: 0 5px; border-radius: 8px;
+      background: #fff1f2; color: #e11d48; font-size: 9px; font-weight: 900;
+      display: flex; align-items: center; justify-content: center;
     }
     .cartoon-pin .index {
       position: absolute; top: -8px; left: -8px; min-width: 18px; height: 18px; border-radius: 9px;
@@ -210,24 +307,39 @@ export function buildLeafletHtml(markers: MapMarkerPayload[], center: { lng: num
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     ${MAP_BOOT}
+    ${MAP_VIEW_HELPERS}
     const markers = ${markerJson};
     const center = ${centerJson};
-    const map = L.map('map', { zoomControl: true, touchZoom: true, scrollWheelZoom: true, doubleClickZoom: true }).setView([center.lat, center.lng], 12);
+    const displayMarkers = displayMarkersForCity(markers, center);
+    const map = L.map('map', { zoomControl: false, touchZoom: true, scrollWheelZoom: true, doubleClickZoom: true }).setView([center.lat, center.lng], 12);
     window.__map = map;
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}', {
+      subdomains: ['1', '2', '3', '4'],
       maxZoom: 18,
-      attribution: '© OpenStreetMap'
+      attribution: '© 高德地图'
     }).addTo(map);
 
     const latlngs = [];
-    markers.forEach(function(item) {
+    displayMarkers.forEach(function(item) {
       latlngs.push([item.lat, item.lng]);
       const timeLabel = item.scheduleLabel + (item.duration ? ' · ' + item.duration : '');
+      const riskClass = item.riskLevel === 'low' ? '' : ' risk';
+      const riskBadge = item.riskLevel === 'low' ? '' : '<div class="risk-badge">险</div>';
       const icon = L.divIcon({
         className: '',
-        html: '<div class="cartoon-pin"><div class="bubble">' + item.icon + '<div class="index">' + item.index + '</div></div><div class="title">' + item.title + '</div><div class="time">' + timeLabel + '</div></div>',
-        iconSize: [96, 96],
-        iconAnchor: [48, 84],
+        html: '<div class="cartoon-pin' + riskClass + '">' +
+          '<div class="topo-meta">第' + item.index + '站 · ' + item.dateLabel + '</div>' +
+          '<div class="topo-card">' +
+            '<div class="topo-icon">' + item.icon + '</div>' +
+            '<div class="topo-body">' +
+              '<div class="topo-title">' + item.title + '</div>' +
+              '<div class="topo-sub">' + item.startTime + ' · ' + (item.location || '地点待定') + '</div>' +
+            '</div>' +
+          '</div>' +
+          riskBadge +
+        '</div>',
+        iconSize: [132, 56],
+        iconAnchor: [66, 52],
       });
       const marker = L.marker([item.lat, item.lng], { icon, draggable: item.draggable }).addTo(map);
       marker.on('click', function() {
@@ -245,6 +357,14 @@ export function buildLeafletHtml(markers: MapMarkerPayload[], center: { lng: num
 
     if (latlngs.length > 1) {
       L.polyline(latlngs, { color: '#89B8FF', weight: 5, opacity: 0.85 }).addTo(map);
+      for (let i = 0; i < displayMarkers.length - 1; i += 1) {
+        if (displayMarkers[i].riskLevel !== 'low' || displayMarkers[i + 1].riskLevel !== 'low') {
+          L.polyline(
+            [[displayMarkers[i].lat, displayMarkers[i].lng], [displayMarkers[i + 1].lat, displayMarkers[i + 1].lng]],
+            { color: '#EF4444', weight: 7, opacity: 0.92 }
+          ).addTo(map);
+        }
+      }
     }
     window.mapApi.fitView = function() {
       if (latlngs.length > 0) map.fitBounds(latlngs, { padding: [40, 40] });
@@ -255,6 +375,10 @@ export function buildLeafletHtml(markers: MapMarkerPayload[], center: { lng: num
       map.fitBounds(latlngs, { padding: [40, 40] });
       window.__didInitialFit = true;
     }
+    setTimeout(function() {
+      map.invalidateSize();
+      if (latlngs.length > 0) map.fitBounds(latlngs, { padding: [40, 40] });
+    }, 250);
   </script>
 </body>
 </html>`;
@@ -264,16 +388,20 @@ export function buildMapMarkers(
   items: ItineraryItem[],
   city: string,
   startDate?: string | null,
+  itemWeather?: Record<string, ItemWeatherInfo>,
 ): MapMarkerPayload[] {
   return items.map((item, index) => {
     const point = resolveMapPoint(item, index, city);
     const nodeType = resolveNodeType(item);
+    const weather = itemWeather?.[item.id];
+    const riskLevel = riskLevelForItem(item, weather);
+    const riskText = riskTextForItem(item, weather);
     return {
       id: item.id,
       index: index + 1,
       lng: point.lng,
       lat: point.lat,
-      icon: point.icon,
+      icon: categoryEmojiForItem(item),
       title: item.title,
       startTime: item.start_time,
       endTime: item.end_time,
@@ -283,6 +411,8 @@ export function buildMapMarkers(
       duration: formatDurationLabel(item.start_time, item.end_time),
       location: item.location,
       nodeType,
+      riskLevel,
+      riskText,
       editable: isEditableNode(item),
       draggable: isEditableNode(item),
     };

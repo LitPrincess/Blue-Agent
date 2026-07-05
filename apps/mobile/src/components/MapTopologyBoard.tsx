@@ -1,47 +1,63 @@
-import { useMemo, useRef } from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useMemo, useRef, useState } from "react";
+import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { WebView, WebViewMessageEvent } from "react-native-webview";
 
-import { Itinerary, ItineraryItem } from "../types";
+import { SpatiotemporalTimeline } from "./SpatiotemporalTimeline";
+import { ItemWeatherInfo, Itinerary, ItineraryItem } from "../types";
 import { UpdateNodePayload } from "../services/api";
 import { resolveCityCenter } from "../utils/geoCoords";
-import { formatItemSchedule } from "../utils/dateUtils";
 import { buildAmapHtml, buildLeafletHtml, buildMapMarkers } from "../utils/mapHtml";
-import { nodeVisual } from "../utils/nodeUtils";
 
 type Props = {
   itinerary: Itinerary;
   city: string;
   startDate?: string | null;
+  itemWeather?: Record<string, ItemWeatherInfo>;
+  busy?: boolean;
+  poiSearching?: boolean;
   onUpdateNode: (itemId: string, payload: UpdateNodePayload) => Promise<void>;
   onEditItem: (item: ItineraryItem) => void;
+  onNavigateSegment?: (from: ItineraryItem, to: ItineraryItem) => void;
+  onDeleteItem?: (item: ItineraryItem) => void;
+  onAddAfterItem?: (item: ItineraryItem) => void;
+  onRecommendPOI?: (item: ItineraryItem) => void;
   onMapInteractionChange?: (active: boolean) => void;
 };
 
-const MAP_HEIGHT = 420;
+const MAP_HEIGHT_EXPANDED = 320;
+const MAP_HEIGHT_COLLAPSED = 0;
 
 export function MapTopologyBoard({
   itinerary,
   city,
   startDate,
+  itemWeather,
+  busy,
+  poiSearching,
   onUpdateNode,
   onEditItem,
+  onNavigateSegment,
+  onDeleteItem,
+  onAddAfterItem,
+  onRecommendPOI,
   onMapInteractionChange,
 }: Props) {
+  const [mapExpanded, setMapExpanded] = useState(true);
   const webRef = useRef<WebView>(null);
   const amapKey = process.env.EXPO_PUBLIC_AMAP_WEB_KEY?.trim() ?? "";
   const items = itinerary.items;
   const mapCity = city || itinerary.intent.destination || "北京";
 
   const html = useMemo(() => {
-    const markers = buildMapMarkers(items, mapCity, startDate ?? itinerary.intent.start_date);
+    const markers = buildMapMarkers(items, mapCity, startDate ?? itinerary.intent.start_date, itemWeather);
     const centerPoint = resolveCityCenter(mapCity);
     const center = { lng: centerPoint.lng, lat: centerPoint.lat };
     if (amapKey) {
       return buildAmapHtml(amapKey, markers, center);
     }
     return buildLeafletHtml(markers, center);
-  }, [amapKey, items, mapCity, startDate, itinerary.intent.start_date]);
+  }, [amapKey, items, mapCity, startDate, itinerary.intent.start_date, itemWeather]);
 
   function injectMapCommand(script: string) {
     webRef.current?.injectJavaScript(`${script}; true;`);
@@ -81,102 +97,121 @@ export function MapTopologyBoard({
 
   return (
     <View style={styles.wrap}>
-      <View style={styles.legendRow}>
-        {(Object.keys(nodeVisual) as Array<keyof typeof nodeVisual>).map((kind) => (
-          <View key={kind} style={styles.legendItem}>
-            <View style={[styles.legendDot, { borderColor: nodeVisual[kind].border, backgroundColor: nodeVisual[kind].fill }]} />
-            <Text style={styles.legendText}>{nodeVisual[kind].label}</Text>
+      <Pressable style={styles.mapToggle} onPress={() => setMapExpanded((current) => !current)}>
+        <View style={styles.mapToggleLeft}>
+          <Ionicons name="map-outline" size={16} color="#1B6FFF" />
+          <Text style={styles.mapToggleTitle}>行程地图</Text>
+          <Text style={styles.mapToggleMeta}>
+            {items.length} 个节点 · {amapKey ? "高德" : "OSM"}
+          </Text>
+        </View>
+        <Ionicons name={mapExpanded ? "chevron-up" : "chevron-down"} size={18} color="#6B7A99" />
+      </Pressable>
+
+      {mapExpanded ? (
+        <>
+          <View style={styles.mapHintBox}>
+            <Ionicons name="information-circle-outline" size={14} color="#1B6FFF" />
+            <Text style={styles.mapHintText}>
+              软节点（餐饮/景点）范围较小，相对车站/机场等迎接点需要双指放大查看；可用右侧 +/- 或「全览」调整视野。
+            </Text>
           </View>
-        ))}
-      </View>
+          <View
+          style={[styles.mapShell, { height: MAP_HEIGHT_EXPANDED }]}
+          onTouchStart={() => onMapInteractionChange?.(true)}
+          onTouchEnd={() => onMapInteractionChange?.(false)}
+          onTouchCancel={() => onMapInteractionChange?.(false)}
+        >
+          <WebView
+            ref={webRef}
+            key={`map-${itinerary.id}`}
+            originWhitelist={["*"]}
+            source={{ html }}
+            style={styles.map}
+            scrollEnabled={false}
+            nestedScrollEnabled
+            overScrollMode="never"
+            bounces={false}
+            javaScriptEnabled
+            domStorageEnabled
+            androidLayerType="hardware"
+            allowsInlineMediaPlayback
+            onMessage={handleMessage}
+            setSupportMultipleWindows={false}
+          />
 
-      <View
-        style={styles.mapShell}
-        onTouchStart={() => onMapInteractionChange?.(true)}
-        onTouchEnd={() => onMapInteractionChange?.(false)}
-        onTouchCancel={() => onMapInteractionChange?.(false)}
-      >
-        <WebView
-          ref={webRef}
-          key={`map-${itinerary.id}`}
-          originWhitelist={["*"]}
-          source={{ html }}
-          style={styles.map}
-          scrollEnabled={false}
-          nestedScrollEnabled
-          overScrollMode="never"
-          bounces={false}
-          javaScriptEnabled
-          domStorageEnabled
-          androidLayerType="hardware"
-          allowsInlineMediaPlayback
-          onMessage={handleMessage}
-          setSupportMultipleWindows={false}
-        />
-
-        <View style={styles.mapBadge}>
-          <Text style={styles.mapBadgeText}>{amapKey ? "高德地图" : "OpenStreetMap"}</Text>
+          <View style={styles.zoomBar}>
+            <Pressable style={styles.zoomBtn} onPress={() => injectMapCommand("window.mapApi.zoomIn()")}>
+              <Text style={styles.zoomText}>＋</Text>
+            </Pressable>
+            <Pressable style={styles.zoomBtn} onPress={() => injectMapCommand("window.mapApi.zoomOut()")}>
+              <Text style={styles.zoomText}>－</Text>
+            </Pressable>
+            <Pressable style={styles.zoomBtn} onPress={() => injectMapCommand("window.mapApi.fitView()")}>
+              <Text style={styles.fitText}>全览</Text>
+            </Pressable>
+          </View>
         </View>
+        </>
+      ) : (
+        <View style={[styles.mapShell, styles.mapShellCollapsed, { height: MAP_HEIGHT_COLLAPSED }]} />
+      )}
 
-        <View style={styles.zoomBar}>
-          <Pressable style={styles.zoomBtn} onPress={() => injectMapCommand("window.mapApi.zoomIn()")}>
-            <Text style={styles.zoomText}>＋</Text>
-          </Pressable>
-          <Pressable style={styles.zoomBtn} onPress={() => injectMapCommand("window.mapApi.zoomOut()")}>
-            <Text style={styles.zoomText}>－</Text>
-          </Pressable>
-          <Pressable style={styles.zoomBtn} onPress={() => injectMapCommand("window.mapApi.fitView()")}>
-            <Text style={styles.fitText}>全览</Text>
-          </Pressable>
-        </View>
-      </View>
-
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-        {items.map((item, index) => (
-          <Pressable key={item.id} style={styles.nodeChip} onPress={() => onEditItem(item)}>
-            <Text style={styles.nodeChipIndex}>#{index + 1}</Text>
-            <Text style={styles.nodeChipTime}>
-              {formatItemSchedule(startDate ?? itinerary.intent.start_date, item.day, item.start_time, item.end_time)}
-            </Text>
-            <Text style={styles.nodeChipTitle} numberOfLines={1}>
-              {item.title}
-            </Text>
-          </Pressable>
-        ))}
-      </ScrollView>
-
-      <Text style={styles.tip}>
-        双指缩放地图，拖动卡通地标改位置，点击地标或节点条编辑标题/时间/地点。
-      </Text>
+      <Text style={styles.sectionLabel}>行程节点</Text>
+      <SpatiotemporalTimeline
+        items={items}
+        startDate={startDate ?? itinerary.intent.start_date}
+        busy={busy}
+        poiSearching={poiSearching}
+        itemWeather={itemWeather}
+        onPressItem={onEditItem}
+        onNavigateSegment={onNavigateSegment}
+        onDeleteItem={onDeleteItem}
+        onAddAfterItem={onAddAfterItem}
+        onRecommendPOI={onRecommendPOI}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   wrap: { gap: 10 },
-  legendRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  legendItem: { flexDirection: "row", alignItems: "center", gap: 4 },
-  legendDot: { width: 12, height: 12, borderRadius: 6, borderWidth: 2 },
-  legendText: { color: "#7085A2", fontSize: 10, fontWeight: "900" },
+  mapToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 14,
+    backgroundColor: "#FFF",
+    borderWidth: 1,
+    borderColor: "#D7E8FF",
+  },
+  mapToggleLeft: { flexDirection: "row", alignItems: "center", gap: 8, flex: 1, minWidth: 0 },
+  mapToggleTitle: { color: "#0F1B35", fontSize: 13, fontWeight: "900" },
+  mapToggleMeta: { color: "#8BA0BD", fontSize: 10, fontWeight: "700" },
+  mapHintBox: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: "#EEF4FF",
+    borderWidth: 1,
+    borderColor: "#D7E8FF",
+  },
+  mapHintText: { flex: 1, color: "#527099", fontSize: 10, lineHeight: 15, fontWeight: "700" },
+  sectionLabel: { color: "#6B7A99", fontSize: 12, fontWeight: "700", marginTop: 4 },
   mapShell: {
-    height: MAP_HEIGHT,
-    borderRadius: 23,
+    borderRadius: 20,
     overflow: "hidden",
     backgroundColor: "#E8F4FF",
     borderWidth: 1,
     borderColor: "#D7E8FF",
   },
+  mapShellCollapsed: { borderWidth: 0, backgroundColor: "transparent" },
   map: { flex: 1, backgroundColor: "transparent" },
-  mapBadge: {
-    position: "absolute",
-    left: 10,
-    top: 10,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.92)",
-  },
-  mapBadgeText: { color: "#527099", fontSize: 9, fontWeight: "900" },
   zoomBar: {
     position: "absolute",
     right: 10,
@@ -195,18 +230,4 @@ const styles = StyleSheet.create({
   },
   zoomText: { color: "#287CFF", fontSize: 18, fontWeight: "900", marginTop: -2 },
   fitText: { color: "#287CFF", fontSize: 10, fontWeight: "900" },
-  chipRow: { gap: 8, paddingVertical: 2 },
-  nodeChip: {
-    width: 112,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 14,
-    backgroundColor: "#EEF6FF",
-    borderWidth: 1,
-    borderColor: "#D7E8FF",
-  },
-  nodeChipIndex: { color: "#287CFF", fontSize: 9, fontWeight: "900" },
-  nodeChipTime: { marginTop: 2, color: "#7F93B1", fontSize: 9, fontWeight: "900" },
-  nodeChipTitle: { marginTop: 4, color: "#30496F", fontSize: 11, fontWeight: "900" },
-  tip: { color: "#8BA0BD", fontSize: 10, lineHeight: 15 },
 });

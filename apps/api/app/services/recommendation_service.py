@@ -16,15 +16,18 @@ from app.models.schemas import (
 from app.services.amap_service import amap_service
 from app.services.llm import llm_service
 from app.services.store import store
+from app.utils.city import resolve_search_city
 
 
 class RecommendationService:
     def recommend(self, request: RecommendPOIRequest) -> RecommendPOIResponse:
-        pois = amap_service.search_poi(request.city, request.keyword, request.category, limit=8)
+        search_city = resolve_search_city(request.city)
+        scoped_request = request.model_copy(update={"city": search_city})
+        pois = amap_service.search_poi(search_city, request.keyword, request.category, limit=12)
         candidates: list[POICandidate] = []
 
         for poi in pois:
-            candidate = self._poi_to_candidate(poi, request)
+            candidate = self._poi_to_candidate(poi, scoped_request)
             if request.near_lat is not None and request.near_lng is not None and candidate.geo_lat and candidate.geo_lng:
                 route = amap_service.route_estimate(
                     request.near_lng,
@@ -41,9 +44,10 @@ class RecommendationService:
             candidate = attach_platform_scores(candidate, request.keyword)
             candidates.append(candidate)
 
-        ranked = self._rank_with_llm(request, candidates)
+        candidates = self._filter_candidates(candidates, request, search_city)
+        ranked = self._rank_with_llm(scoped_request, candidates)
         top_pick = ranked[0].name if ranked else "暂无推荐"
-        summary = f"在{request.city}找到 {len(ranked)} 家「{request.keyword}」相关{self._category_label(request.category)}候选。"
+        summary = f"在{search_city}找到 {len(ranked)} 家「{request.keyword}」相关{self._category_label(request.category)}候选。"
         llm_recommendation = self._build_recommendation_text(request, ranked, top_pick)
         return RecommendPOIResponse(
             candidates=ranked,
@@ -96,6 +100,36 @@ class RecommendationService:
             }
         )
         return store.save_itinerary(updated)
+
+    def _filter_candidates(
+        self,
+        candidates: list[POICandidate],
+        request: RecommendPOIRequest,
+        search_city: str,
+    ) -> list[POICandidate]:
+        if not candidates:
+            return []
+
+        city_hint = search_city.replace("市", "").replace("县", "").replace("区", "")[:4]
+        filtered: list[POICandidate] = []
+        for candidate in candidates:
+            if request.near_lat is not None and request.near_lng is not None:
+                if candidate.distance_km is not None and candidate.distance_km > 50:
+                    continue
+            address_blob = f"{candidate.address or ''}{candidate.location or ''}{candidate.name}"
+            if city_hint and city_hint not in address_blob and candidate.distance_km is not None and candidate.distance_km > 25:
+                continue
+            filtered.append(candidate)
+
+        if filtered:
+            return filtered
+
+        local_only = [
+            candidate
+            for candidate in candidates
+            if not city_hint or city_hint in f"{candidate.address or ''}{candidate.location or ''}{candidate.name}"
+        ]
+        return local_only or candidates[:3]
 
     def _poi_to_candidate(self, poi: dict[str, Any], request: RecommendPOIRequest) -> POICandidate:
         location = poi.get("location") or ""

@@ -18,13 +18,16 @@ from app.models.schemas import (
     IntentAnalyzeResponse,
     MultimodalInputBundle,
     PaymentAuthorizationRequest,
+    PrepareFromItineraryRequest,
     PrepareOrderRequest,
     RefinementRequest,
     RescheduleNodeRequest,
     DeleteNodeRequest,
+    AddNodeRequest,
     ReorderNodesRequest,
     SmartUpdateNodeRequest,
     SmartUpdateNodeResponse,
+    SyncItineraryRequest,
     UpdateNodeRequest,
     ReplanRequest,
     SystemSyncRequest,
@@ -37,6 +40,12 @@ from app.models.schemas import (
     RecommendPOIResponse,
     ConfirmPOIRequest,
     ItineraryPriceQuote,
+    RecommendAccommodationAreaRequest,
+    RecommendAccommodationAreaResponse,
+    ItineraryWeatherRequest,
+    ItineraryWeatherResponse,
+    WeatherOptimizeRequest,
+    WeatherOptimizeResponse,
 )
 from app.agent.intent import intent_extractor
 from app.services.intent_analysis import intent_analysis_service
@@ -50,9 +59,11 @@ from app.services.poster_features import (
 )
 from app.services.price_engine import price_engine
 from app.services.rag import rag_service
+from app.services.accommodation_area_service import accommodation_area_service
 from app.services.recommendation_service import recommendation_service
 from app.services.speech import speech_service
 from app.services.store import store
+from app.services.weather_service import weather_service
 from app.tools.travel_tools import travel_tools
 
 settings = get_settings()
@@ -167,6 +178,13 @@ def refine_itinerary(request: RefinementRequest) -> dict[str, object]:
     }
 
 
+@app.post("/itineraries/sync")
+def sync_itinerary(request: SyncItineraryRequest) -> dict[str, object]:
+    itinerary = request.itinerary.model_copy(update={"user_id": request.user_id})
+    saved = store.save_itinerary(itinerary)
+    return {"itinerary": saved}
+
+
 @app.post("/itineraries/reschedule")
 def reschedule_node(request: RescheduleNodeRequest) -> dict[str, object]:
     try:
@@ -201,6 +219,14 @@ def delete_node(request: DeleteNodeRequest) -> SmartUpdateNodeResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/itineraries/add-node", response_model=SmartUpdateNodeResponse)
+def add_node(request: AddNodeRequest) -> SmartUpdateNodeResponse:
+    try:
+        return itinerary_refiner.add_node(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/itineraries/reorder-nodes", response_model=SmartUpdateNodeResponse)
 def reorder_nodes(request: ReorderNodesRequest) -> SmartUpdateNodeResponse:
     try:
@@ -214,6 +240,13 @@ def search_recommendations(request: RecommendPOIRequest) -> RecommendPOIResponse
     if not request.city.strip() or not request.keyword.strip():
         raise HTTPException(status_code=400, detail="city and keyword are required")
     return recommendation_service.recommend(request)
+
+
+@app.post("/recommendations/accommodation-areas", response_model=RecommendAccommodationAreaResponse)
+def search_accommodation_areas(request: RecommendAccommodationAreaRequest) -> RecommendAccommodationAreaResponse:
+    if not request.city.strip():
+        raise HTTPException(status_code=400, detail="city is required")
+    return accommodation_area_service.recommend(request)
 
 
 @app.post("/nodes/confirm-poi")
@@ -232,6 +265,30 @@ def get_price_quote(itinerary_id: str) -> ItineraryPriceQuote:
     if itinerary is None:
         raise HTTPException(status_code=404, detail="Itinerary not found")
     return price_engine.quote_itinerary(itinerary)
+
+
+@app.post("/weather/itinerary", response_model=ItineraryWeatherResponse)
+def get_itinerary_weather(request: ItineraryWeatherRequest) -> ItineraryWeatherResponse:
+    itinerary = store.get_itinerary(request.itinerary_id)
+    if itinerary is None:
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    return weather_service.itinerary_weather(itinerary)
+
+
+@app.post("/weather/optimize", response_model=WeatherOptimizeResponse)
+def optimize_itinerary_by_weather(request: WeatherOptimizeRequest) -> WeatherOptimizeResponse:
+    itinerary = store.get_itinerary(request.itinerary_id)
+    if itinerary is None:
+        raise HTTPException(status_code=404, detail="Itinerary not found")
+    weather = weather_service.itinerary_weather(itinerary)
+    try:
+        return itinerary_refiner.weather_optimize(
+            request,
+            weather,
+            weather_service.weather_context_for_llm(weather),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/itineraries/{itinerary_id}")
@@ -274,6 +331,15 @@ def get_comparison(comparison_id: str) -> dict[str, object]:
 def prepare_order(request: PrepareOrderRequest) -> dict[str, object]:
     try:
         order = execution_center.prepare(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"order": order}
+
+
+@app.post("/orders/prepare-from-itinerary")
+def prepare_order_from_itinerary(request: PrepareFromItineraryRequest) -> dict[str, object]:
+    try:
+        order = execution_center.prepare_from_itinerary(request)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"order": order}
@@ -328,8 +394,12 @@ def guardian_status(itinerary_id: str) -> dict[str, object]:
 
 
 @app.post("/guardian/incidents/simulate")
-def simulate_incident(itinerary_id: str, kind: str = "flight_delay") -> dict[str, object]:
-    return {"incident": guardian_service.simulate_incident(itinerary_id, kind)}
+def simulate_incident(
+    itinerary_id: str,
+    kind: str = "flight_delay",
+    detail: str | None = None,
+) -> dict[str, object]:
+    return {"incident": guardian_service.simulate_incident(itinerary_id, kind, detail)}
 
 
 @app.post("/guardian/replan")

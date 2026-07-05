@@ -10,17 +10,36 @@
     ],
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.travelagent.bluemap",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "用于语音输入您的出行需求"
+        "NSMicrophoneUsageDescription": "用于语音输入您的出行需求",
+        "NSCalendarsUsageDescription": "用于读取和写入行程日程",
+        "NSRemindersUsageDescription": "用于读取和写入行程备忘录"
       }
     },
     "android": {
+      "package": "com.travelagent.bluemap",
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#EAF3FF"
       },
       "permissions": [
-        "RECORD_AUDIO"
-      ]
+        "RECORD_AUDIO",
+        "READ_CALENDAR",
+        "WRITE_CALENDAR",
+        "POST_NOTIFICATIONS",
+        "SCHEDULE_EXACT_ALARM",
+        "USE_EXACT_ALARM"
+      ],
+      "queries": {
+        "schemes": [
+          "imeituan",
+          "dianping",
+          "amapuri",
+          "androidamap",
+          "ctrip"
+        ]
+      }
     },
     "plugins": [
       [
@@ -39,11 +58,28 @@
           ]
         }
       ],
+      [
+        "expo-notifications",
+        {
+          "color": "#1B6FFF",
+          "defaultChannel": "trip-reminders"
+        }
+      ],
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "用于读取和写入行程日程",
+          "remindersPermission": "用于读取和写入行程备忘录"
+        }
+      ],
       "expo-font",
       "expo-asset"
     ],
     "extra": {
-      "apiBaseUrl": "http://localhost:8000"
+      "apiBaseUrl": "http://localhost:8000",
+      "eas": {
+        "projectId": "travel-director-agent-local"
+      }
     }
   }
 }

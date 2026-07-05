@@ -144,6 +144,11 @@ class RefinementRequest(BaseModel):
     instruction: str
 
 
+class SyncItineraryRequest(BaseModel):
+    user_id: str = "demo-user"
+    itinerary: Itinerary
+
+
 class RescheduleNodeRequest(BaseModel):
     user_id: str = "demo-user"
     itinerary_id: str
@@ -203,6 +208,19 @@ class DeleteNodeRequest(BaseModel):
     instruction: str | None = None
 
 
+class AddNodeRequest(BaseModel):
+    user_id: str = "demo-user"
+    itinerary_id: str
+    day: int
+    start_time: str
+    end_time: str | None = None
+    title: str = "新活动"
+    location: str = ""
+    category: Literal["food", "sight", "hotel", "free"] = "free"
+    insert_after_item_id: str | None = None
+    instruction: str | None = None
+
+
 class ReorderNodesRequest(BaseModel):
     user_id: str = "demo-user"
     itinerary_id: str
@@ -251,6 +269,36 @@ class RecommendPOIResponse(BaseModel):
     llm_recommendation: str
 
 
+class AccommodationAreaCandidate(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    name: str
+    area: str
+    search_keyword: str
+    reason: str
+    pros: list[str] = Field(default_factory=list)
+    cons: list[str] = Field(default_factory=list)
+    best_for: str = ""
+    geo_lat: float | None = None
+    geo_lng: float | None = None
+    distance_minutes_to_key_anchor: int | None = None
+    estimated_price_range: str = ""
+    score: int = 80
+
+
+class RecommendAccommodationAreaRequest(BaseModel):
+    user_id: str = "demo-user"
+    city: str
+    itinerary_id: str | None = None
+    preference: str | None = None
+    budget: str | None = None
+
+
+class RecommendAccommodationAreaResponse(BaseModel):
+    candidates: list[AccommodationAreaCandidate]
+    summary: str
+    llm_recommendation: str
+
+
 class ConfirmPOIRequest(BaseModel):
     user_id: str = "demo-user"
     itinerary_id: str
@@ -278,6 +326,48 @@ class ItineraryPriceQuote(BaseModel):
     breakdown: list[PriceBreakdownItem] = Field(default_factory=list)
     duration_text: str = ""
     data_sources: list[str] = Field(default_factory=list)
+
+
+class ItemWeatherInfo(BaseModel):
+    item_id: str
+    source: str = "qweather"
+    date: str | None = None
+    time: str | None = None
+    text: str = ""
+    temp: int | None = None
+    feels_like: int | None = None
+    pop: int | None = None
+    precip: float | None = None
+    wind_dir: str | None = None
+    wind_scale: str | None = None
+    daily_text: str | None = None
+    indices: list[str] = Field(default_factory=list)
+    risk_level: Literal["low", "medium", "high"] = "low"
+    risk_tags: list[str] = Field(default_factory=list)
+    advice: str = ""
+    label: str = ""
+
+
+class ItineraryWeatherRequest(BaseModel):
+    user_id: str = "demo-user"
+    itinerary_id: str
+
+
+class ItineraryWeatherResponse(BaseModel):
+    available: bool
+    source: str = "qweather"
+    summary: str
+    item_weather: list[ItemWeatherInfo] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class WeatherOptimizeRequest(BaseModel):
+    user_id: str = "demo-user"
+    itinerary_id: str
+
+
+class WeatherOptimizeResponse(SmartUpdateNodeResponse):
+    weather: ItineraryWeatherResponse
 
 
 class UploadKind(str, Enum):
@@ -356,6 +446,12 @@ class PrepareOrderRequest(BaseModel):
     option_id: str
 
 
+class PrepareFromItineraryRequest(BaseModel):
+    user_id: str = "demo-user"
+    itinerary_id: str
+    option: PlanOption | None = None
+
+
 class OrderStep(BaseModel):
     name: str
     status: Literal["pending", "running", "done", "failed"] = "pending"
@@ -392,8 +488,8 @@ class SystemSyncRequest(BaseModel):
 
 
 class SyncItem(BaseModel):
-    target: Literal["calendar", "alarm", "widget", "memo", "map"]
-    status: Literal["ready", "synced", "failed"] = "synced"
+    target: Literal["calendar", "alarm", "clock", "widget", "memo", "map"]
+    status: Literal["ready", "synced", "failed"] = "ready"
     title: str
     detail: str
     deeplink: str | None = None
@@ -411,7 +507,7 @@ class SystemSyncResult(BaseModel):
 class TravelIncident(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     itinerary_id: str
-    kind: Literal["flight_delay", "weather", "traffic", "meeting_conflict", "hotel_risk"]
+    kind: str
     severity: Literal["low", "medium", "high"]
     title: str
     detail: str
@@ -430,6 +526,8 @@ class ReplanRequest(BaseModel):
     user_id: str = "demo-user"
     itinerary_id: str
     incident_id: str | None = None
+    kind: str | None = None
+    detail: str | None = None
 
 
 class ReplanProposal(BaseModel):

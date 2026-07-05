@@ -6,6 +6,7 @@ dist/
 build/
 .expo/
 .expo-shared/
+.expo-test-bundle/
 __pycache__/
 .pytest_cache/
 .ruff_cache/

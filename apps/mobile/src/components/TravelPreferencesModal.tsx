@@ -8,6 +8,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 
 import {
   ACCOMMODATION_OPTIONS,
@@ -139,6 +140,168 @@ export function TravelPreferencesModal({ visible, value, onClose, onComplete }: 
   );
 }
 
+export function TravelPreferencesInline({
+  value,
+  onChange,
+}: {
+  value: TravelPreferences;
+  onChange: (value: TravelPreferences) => void;
+}) {
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+
+  function selectSingle<K extends "companions" | "pace" | "accommodation">(key: K, id: string) {
+    onChange({ ...value, [key]: id });
+  }
+
+  function toggleMulti(key: "styles" | "schedules", id: string) {
+    const list = value[key];
+    onChange({
+      ...value,
+      [key]: list.includes(id) ? list.filter((item) => item !== id) : [...list, id],
+    });
+  }
+
+  function selectedLabels(options: { id: string; label: string }[], selected: string[]) {
+    const labels = selected.map((id) => options.find((item) => item.id === id)?.label).filter(Boolean);
+    return labels.length ? labels.join(" / ") : "未选择";
+  }
+
+  function toggleSection(key: string) {
+    setExpandedKey((current) => (current === key ? null : key));
+  }
+
+  return (
+    <View style={inlineStyles.card}>
+      <View style={inlineStyles.titleBox}>
+        <Text style={inlineStyles.title}>出行偏好</Text>
+      </View>
+      <CollapsiblePreferenceSection
+        title="同行伙伴"
+        summary={selectedLabels(COMPANION_OPTIONS, [value.companions])}
+        summaryActive={Boolean(value.companions)}
+        expanded={expandedKey === "companions"}
+        onToggle={() => toggleSection("companions")}
+      >
+        <ChipRow
+          options={COMPANION_OPTIONS}
+          selected={[value.companions]}
+          onPress={(id) => selectSingle("companions", id)}
+          variant="inline"
+        />
+      </CollapsiblePreferenceSection>
+      <CollapsiblePreferenceSection
+        title="风格偏好"
+        summary={selectedLabels(STYLE_OPTIONS, value.styles)}
+        summaryActive={value.styles.length > 0}
+        expanded={expandedKey === "styles"}
+        onToggle={() => toggleSection("styles")}
+      >
+        <ChipRow options={STYLE_OPTIONS} selected={value.styles} onPress={(id) => toggleMulti("styles", id)} variant="inline" />
+      </CollapsiblePreferenceSection>
+      <CollapsiblePreferenceSection
+        title="行程节奏"
+        summary={selectedLabels(PACE_OPTIONS, [value.pace])}
+        summaryActive={Boolean(value.pace)}
+        expanded={expandedKey === "pace"}
+        onToggle={() => toggleSection("pace")}
+      >
+        <ChipRow options={PACE_OPTIONS} selected={[value.pace]} onPress={(id) => selectSingle("pace", id)} variant="inline" />
+      </CollapsiblePreferenceSection>
+      <CollapsiblePreferenceSection
+        title="住宿偏好"
+        summary={selectedLabels(ACCOMMODATION_OPTIONS, [value.accommodation])}
+        summaryActive={Boolean(value.accommodation)}
+        expanded={expandedKey === "accommodation"}
+        onToggle={() => toggleSection("accommodation")}
+      >
+        <ChipRow
+          options={ACCOMMODATION_OPTIONS}
+          selected={[value.accommodation]}
+          onPress={(id) => selectSingle("accommodation", id)}
+          variant="inline"
+        />
+      </CollapsiblePreferenceSection>
+      <CollapsiblePreferenceSection
+        title="时间安排"
+        summary={selectedLabels(SCHEDULE_OPTIONS, value.schedules)}
+        summaryActive={value.schedules.length > 0}
+        expanded={expandedKey === "schedules"}
+        onToggle={() => toggleSection("schedules")}
+      >
+        <ChipRow options={SCHEDULE_OPTIONS} selected={value.schedules} onPress={(id) => toggleMulti("schedules", id)} variant="inline" />
+      </CollapsiblePreferenceSection>
+      <CollapsiblePreferenceSection
+        title="其他"
+        summary={value.notes.trim() || "未填写"}
+        summaryActive={Boolean(value.notes.trim())}
+        expanded={expandedKey === "notes"}
+        onToggle={() => toggleSection("notes")}
+      >
+        <View style={inlineStyles.notesBox}>
+          <TextInput
+            style={inlineStyles.notesInput}
+            value={value.notes}
+            onChangeText={(text) =>
+              onChange({
+                ...value,
+                notes: text.slice(0, NOTES_MAX_LENGTH),
+              })
+            }
+            placeholder="在这里输入更多偏好信息"
+            placeholderTextColor="#B8CFF7"
+            multiline
+            textAlignVertical="top"
+          />
+          <Text style={inlineStyles.notesCount}>
+            {value.notes.length}/{NOTES_MAX_LENGTH}
+          </Text>
+        </View>
+      </CollapsiblePreferenceSection>
+    </View>
+  );
+}
+
+function CollapsiblePreferenceSection({
+  title,
+  summary,
+  summaryActive,
+  expanded,
+  onToggle,
+  children,
+}: {
+  title: string;
+  summary: string;
+  summaryActive?: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <View style={[inlineStyles.section, expanded ? inlineStyles.sectionOpen : null]}>
+      <Pressable style={inlineStyles.sectionHead} onPress={onToggle}>
+        <View style={inlineStyles.sectionText}>
+          <Text style={inlineStyles.sectionTitle}>{title}</Text>
+          <Text
+            style={[inlineStyles.sectionSummary, summaryActive ? inlineStyles.sectionSummaryActive : null]}
+            numberOfLines={1}
+          >
+            {summary}
+          </Text>
+        </View>
+        <View style={[inlineStyles.chevronCircle, expanded ? inlineStyles.chevronCircleOpen : null]}>
+          <Ionicons
+            name="chevron-down"
+            size={14}
+            color={expanded ? "#FFFFFF" : "#1B6FFF"}
+            style={{ transform: [{ rotate: expanded ? "180deg" : "0deg" }] }}
+          />
+        </View>
+      </Pressable>
+      {expanded ? <View style={inlineStyles.sectionBody}>{children}</View> : null}
+    </View>
+  );
+}
+
 function PreferenceSection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <View style={styles.section}>
@@ -152,23 +315,26 @@ function ChipRow({
   options,
   selected,
   onPress,
+  variant = "modal",
 }: {
   options: { id: string; label: string; icon?: string }[];
   selected: string[];
   onPress: (id: string) => void;
+  variant?: "modal" | "inline";
 }) {
+  const chipStyles = variant === "inline" ? inlineChipStyles : styles;
   return (
-    <View style={styles.chipRow}>
+    <View style={chipStyles.chipRow}>
       {options.map((option) => {
         const active = selected.includes(option.id);
         return (
           <Pressable
             key={option.id}
-            style={[styles.chip, active && styles.chipActive]}
+            style={[chipStyles.chip, active && chipStyles.chipActive]}
             onPress={() => onPress(option.id)}
           >
-            {option.icon ? <Text style={styles.chipIcon}>{option.icon}</Text> : null}
-            <Text style={[styles.chipText, active && styles.chipTextActive]}>{option.label}</Text>
+            {option.icon ? <Text style={chipStyles.chipIcon}>{option.icon}</Text> : null}
+            <Text style={[chipStyles.chipText, active && chipStyles.chipTextActive]}>{option.label}</Text>
           </Pressable>
         );
       })}
@@ -288,6 +454,120 @@ const styles = StyleSheet.create({
     backgroundColor: "#287CFF",
   },
   completeText: { color: "#FFFFFF", fontSize: 16, fontWeight: "900" },
+});
+
+const inlineStyles = StyleSheet.create({
+  card: {
+    gap: 8,
+  },
+  titleBox: {
+    alignSelf: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: "rgba(0,201,177,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(0,201,177,0.3)",
+    marginBottom: 2,
+  },
+  title: { color: "#00897B", fontSize: 14, fontWeight: "700", textAlign: "center" },
+  section: {
+    borderRadius: 16,
+    backgroundColor: "rgba(255,255,255,0.82)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.95)",
+    overflow: "hidden",
+    shadowColor: "#1B6FFF",
+    shadowOpacity: 0.05,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  sectionOpen: {
+    borderColor: "rgba(27,111,255,0.2)",
+    shadowOpacity: 0.1,
+    shadowRadius: 20,
+    elevation: 2,
+  },
+  sectionHead: {
+    minHeight: 56,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  sectionText: { flex: 1, minWidth: 0 },
+  sectionTitle: { color: "#1B3A6B", fontSize: 14, fontWeight: "700" },
+  sectionSummary: { marginTop: 2, color: "#A0B0CC", fontSize: 11, fontWeight: "500" },
+  sectionSummaryActive: { color: "#1B6FFF" },
+  chevronCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(27,111,255,0.08)",
+  },
+  chevronCircleOpen: {
+    backgroundColor: "#1B6FFF",
+  },
+  sectionBody: {
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(27,111,255,0.08)",
+  },
+  notesBox: {
+    minHeight: 96,
+    borderRadius: 12,
+    backgroundColor: "rgba(245,248,255,0.9)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.07)",
+    padding: 12,
+  },
+  notesInput: {
+    minHeight: 72,
+    color: "#0F1B35",
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: "400",
+  },
+  notesCount: {
+    marginTop: 6,
+    textAlign: "right",
+    color: "#B8CFF7",
+    fontSize: 9,
+    fontWeight: "500",
+  },
+});
+
+const inlineChipStyles = StyleSheet.create({
+  chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  chip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: "rgba(245,248,255,0.9)",
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.07)",
+  },
+  chipActive: {
+    backgroundColor: "#DCE9FF",
+    borderColor: "#1B6FFF",
+    shadowColor: "#1B6FFF",
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  chipIcon: { fontSize: 14 },
+  chipText: { color: "#4B5E7A", fontSize: 12, fontWeight: "500" },
+  chipTextActive: { color: "#1B6FFF", fontWeight: "600" },
 });
 
 const entryStyles = StyleSheet.create({

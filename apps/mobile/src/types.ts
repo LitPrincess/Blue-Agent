@@ -146,7 +146,7 @@ export type TravelOrder = {
 };
 
 export type SyncItem = {
-  target: "calendar" | "alarm" | "widget" | "memo" | "map";
+  target: "calendar" | "alarm" | "clock" | "widget" | "memo" | "map";
   status: "ready" | "synced" | "failed";
   title: string;
   detail: string;
@@ -164,7 +164,7 @@ export type SystemSyncResult = {
 export type TravelIncident = {
   id: string;
   itinerary_id: string;
-  kind: "flight_delay" | "weather" | "traffic" | "meeting_conflict" | "hotel_risk";
+  kind: string;
   severity: "low" | "medium" | "high";
   title: string;
   detail: string;
@@ -238,4 +238,54 @@ export type ItineraryPriceQuote = {
   breakdown: PriceBreakdownItem[];
   duration_text: string;
   data_sources: string[];
+};
+
+export type AccommodationAreaCandidate = {
+  id: string;
+  name: string;
+  area: string;
+  search_keyword: string;
+  reason: string;
+  pros: string[];
+  cons: string[];
+  best_for: string;
+  geo_lat?: number | null;
+  geo_lng?: number | null;
+  distance_minutes_to_key_anchor?: number | null;
+  estimated_price_range: string;
+  score: number;
+};
+
+export type RecommendAccommodationAreaResponse = {
+  candidates: AccommodationAreaCandidate[];
+  summary: string;
+  llm_recommendation: string;
+};
+
+export type ItemWeatherInfo = {
+  item_id: string;
+  source: string;
+  date?: string | null;
+  time?: string | null;
+  text: string;
+  temp?: number | null;
+  feels_like?: number | null;
+  pop?: number | null;
+  precip?: number | null;
+  wind_dir?: string | null;
+  wind_scale?: string | null;
+  daily_text?: string | null;
+  indices: string[];
+  risk_level: "low" | "medium" | "high";
+  risk_tags: string[];
+  advice: string;
+  label: string;
+};
+
+export type ItineraryWeatherResponse = {
+  available: boolean;
+  source: string;
+  summary: string;
+  item_weather: ItemWeatherInfo[];
+  warnings: string[];
 };

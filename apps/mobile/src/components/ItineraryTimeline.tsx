@@ -1,9 +1,12 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Fragment, useMemo } from "react";
+import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 
-import { ItineraryItem } from "../types";
-import { formatItemSchedule } from "../utils/dateUtils";
+import { ItemWeatherInfo, ItineraryItem } from "../types";
+import { formatItemDateLabel, formatItemSchedule } from "../utils/dateUtils";
 import { formatDurationLabel } from "../utils/durationUtils";
+import { sortItineraryItems } from "../utils/amapNavigation";
 import { nodeVisual, resolveNodeType } from "../utils/nodeUtils";
+import { riskTextForItem } from "../utils/riskUtils";
 
 const categoryLabel: Record<ItineraryItem["category"], string> = {
   transport: "交通",
@@ -15,94 +18,209 @@ const categoryLabel: Record<ItineraryItem["category"], string> = {
   alert: "提醒",
 };
 
+type DayWeatherSummary = {
+  day: number;
+  title: string;
+  detail: string;
+  advice: string;
+  hasRisk: boolean;
+};
+
+function buildDayWeatherSummary(
+  day: number,
+  startDate: string | null | undefined,
+  weatherItems: ItemWeatherInfo[],
+): DayWeatherSummary | null {
+  if (!weatherItems.length) return null;
+  const primary = weatherItems.find((item) => item.risk_level !== "low") ?? weatherItems[0];
+  const riskTags = Array.from(new Set(weatherItems.flatMap((item) => item.risk_tags))).slice(0, 3);
+  const labels = Array.from(new Set(weatherItems.map((item) => item.label).filter(Boolean))).slice(0, 2);
+  const advice = primary.advice || "天气适宜，按原计划推进。";
+  return {
+    day,
+    title: `${formatItemDateLabel(startDate, day)} 天气提醒`,
+    detail: labels.length ? labels.join(" / ") : "天气数据已同步",
+    advice: riskTags.length ? `${riskTags.join("、")} · ${advice}` : advice,
+    hasRisk: weatherItems.some((item) => item.risk_level !== "low"),
+  };
+}
+
 type Props = {
   items: ItineraryItem[];
   startDate?: string | null;
   busy?: boolean;
+  deletingItemId?: string | null;
+  itemWeather?: Record<string, ItemWeatherInfo>;
   onEdit: (item: ItineraryItem) => void;
   onMoveUp: (itemId: string) => void;
   onMoveDown: (itemId: string) => void;
   onDelete: (itemId: string) => void;
+  onNavigate?: (item: ItineraryItem) => void;
   onRecommendPOI?: (item: ItineraryItem) => void;
+  onReorder?: (itemIds: string[]) => void;
 };
 
 export function ItineraryTimeline({
   items,
   startDate,
   busy,
+  deletingItemId,
+  itemWeather,
   onEdit,
   onMoveUp,
   onMoveDown,
   onDelete,
+  onNavigate,
   onRecommendPOI,
 }: Props) {
+  const displayItems = useMemo(() => sortItineraryItems(items), [items]);
+  const weatherByDay = new Map<number, ItemWeatherInfo[]>();
+  for (const item of displayItems) {
+    const weather = itemWeather?.[item.id];
+    if (!weather) continue;
+    weatherByDay.set(item.day, [...(weatherByDay.get(item.day) ?? []), weather]);
+  }
+  const daySummaries = new Map<number, DayWeatherSummary>();
+  for (const [day, weatherItems] of weatherByDay) {
+    const summary = buildDayWeatherSummary(day, startDate, weatherItems);
+    if (summary) daySummaries.set(day, summary);
+  }
+
+  const renderRow = (item: ItineraryItem, index: number) => {
+    const visual = nodeVisual[resolveNodeType(item)] ?? nodeVisual.soft_task;
+    const weather = itemWeather?.[item.id];
+    const riskText = riskTextForItem(item, weather);
+    const hasRisk = Boolean(riskText);
+    const schedule = formatItemSchedule(startDate, item.day, item.start_time, item.end_time);
+    const duration = formatDurationLabel(item.start_time, item.end_time);
+    const deleting = deletingItemId === item.id;
+    const daySummary = index === 0 || displayItems[index - 1]?.day !== item.day ? daySummaries.get(item.day) : null;
+    return (
+      <Fragment key={item.id}>
+        {daySummary ? (
+          <View style={[styles.dayWeatherCard, daySummary.hasRisk ? styles.dayWeatherCardWarn : null]}>
+            <Text style={[styles.dayWeatherTitle, daySummary.hasRisk ? styles.dayWeatherTitleWarn : null]}>
+              {daySummary.title}
+            </Text>
+            <Text
+              style={[styles.dayWeatherDetail, daySummary.hasRisk ? styles.dayWeatherDetailWarn : null]}
+              numberOfLines={2}
+            >
+              {daySummary.detail}
+            </Text>
+            <Text
+              style={[styles.dayWeatherAdvice, daySummary.hasRisk ? styles.dayWeatherAdviceWarn : null]}
+              numberOfLines={2}
+            >
+              {daySummary.advice}
+            </Text>
+          </View>
+        ) : null}
+        <View style={[styles.row, { borderColor: visual.border }, hasRisk ? styles.rowRisk : null]}>
+          <View style={[styles.dateCol, { backgroundColor: hasRisk ? "#EF4444" : visual.border }]}>
+            <Text style={styles.dateIndex}>第{index + 1}站</Text>
+            <Text style={styles.dateText}>{schedule.split(" ")[0]}</Text>
+            <Text style={styles.timeText}>{item.start_time}</Text>
+          </View>
+          <Pressable style={styles.main} disabled={deleting || busy} onPress={() => onEdit(item)}>
+            <View style={styles.header}>
+              <Text style={styles.itemTitle} numberOfLines={1}>
+                {item.title}
+              </Text>
+              <Text style={styles.badge}>{categoryLabel[item.category]}</Text>
+            </View>
+            <Text style={styles.meta}>
+              {visual.icon} {visual.label} · {schedule}
+              {duration ? ` · ${duration}` : ""}
+            </Text>
+            <Text style={styles.location}>{item.location}</Text>
+            <Text style={styles.description} numberOfLines={2}>
+              {item.description}
+            </Text>
+            {hasRisk ? (
+              <View style={styles.riskBar}>
+                <Text style={styles.riskLabel}>风险</Text>
+                <Text style={styles.riskText} numberOfLines={2}>
+                  {riskText}
+                </Text>
+              </View>
+            ) : null}
+            {item.estimated_cost ? <Text style={styles.cost}>预估 ¥{item.estimated_cost}</Text> : null}
+          </Pressable>
+          <View style={styles.actions}>
+            {(item.category === "food" || item.category === "free") && onRecommendPOI ? (
+              <Pressable
+                style={[styles.actionBtnWide, styles.pickBtn, busy || deleting ? styles.actionDisabled : null]}
+                disabled={busy || deleting}
+                onPress={() => onRecommendPOI(item)}
+              >
+                <Text style={styles.pickText}>美食选择</Text>
+              </Pressable>
+            ) : null}
+            {(item.category === "hotel") && onRecommendPOI ? (
+              <Pressable
+                style={[styles.actionBtnWide, styles.pickBtnHotel, busy || deleting ? styles.actionDisabled : null]}
+                disabled={busy || deleting}
+                onPress={() => onRecommendPOI(item)}
+              >
+                <Text style={styles.pickTextHotel}>酒店选择</Text>
+              </Pressable>
+            ) : null}
+            {(item.category === "sight") && onRecommendPOI ? (
+              <Pressable
+                style={[styles.actionBtnWide, styles.pickBtnSight, busy || deleting ? styles.actionDisabled : null]}
+                disabled={busy || deleting}
+                onPress={() => onRecommendPOI(item)}
+              >
+                <Text style={styles.pickTextSight}>景点选择</Text>
+              </Pressable>
+            ) : null}
+            {onNavigate ? (
+              <Pressable
+                style={[styles.actionBtnWide, styles.navigateBtn, busy || deleting ? styles.actionDisabled : null]}
+                disabled={busy || deleting}
+                onPress={() => onNavigate(item)}
+              >
+                <Text style={styles.navigateText}>导航</Text>
+              </Pressable>
+            ) : null}
+            <Pressable
+              style={[styles.actionBtn, index === 0 || busy || deleting ? styles.actionDisabled : null]}
+              disabled={index === 0 || busy || deleting}
+              onPress={() => onMoveUp(item.id)}
+            >
+              <Text style={styles.actionText}>↑</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.actionBtn, index === displayItems.length - 1 || busy || deleting ? styles.actionDisabled : null]}
+              disabled={index === displayItems.length - 1 || busy || deleting}
+              onPress={() => onMoveDown(item.id)}
+            >
+              <Text style={styles.actionText}>↓</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.actionBtn, styles.deleteBtn, busy || deleting ? styles.actionDisabled : null]}
+              disabled={busy || deleting || displayItems.length <= 1}
+              onPress={() => onDelete(item.id)}
+            >
+              <Text style={[styles.actionText, styles.deleteText]}>删</Text>
+            </Pressable>
+          </View>
+          {deleting ? (
+            <View pointerEvents="none" style={[styles.deletingOverlay, webDeletingOverlay]}>
+              <Text style={styles.deletingText}>删除中</Text>
+            </View>
+          ) : null}
+        </View>
+      </Fragment>
+    );
+  };
+
   return (
     <View style={styles.wrap}>
       <Text style={styles.title}>行程节点</Text>
-      <Text style={styles.hint}>点击编辑详情，餐饮/住宿节点可「选店」对比后定节点。</Text>
-      {items.map((item, index) => {
-        const visual = nodeVisual[resolveNodeType(item)] ?? nodeVisual.soft_task;
-        const schedule = formatItemSchedule(startDate, item.day, item.start_time, item.end_time);
-        const duration = formatDurationLabel(item.start_time, item.end_time);
-        return (
-          <View key={item.id} style={[styles.row, { borderColor: visual.border }]}>
-            <View style={[styles.dateCol, { backgroundColor: visual.border }]}>
-              <Text style={styles.dateIndex}>#{index + 1}</Text>
-              <Text style={styles.dateText}>{schedule.split(" ")[0]}</Text>
-              <Text style={styles.timeText}>{item.start_time}</Text>
-            </View>
-            <Pressable style={styles.main} onPress={() => onEdit(item)}>
-              <View style={styles.header}>
-                <Text style={styles.itemTitle}>{item.title}</Text>
-                <Text style={styles.badge}>{categoryLabel[item.category]}</Text>
-              </View>
-              <Text style={styles.meta}>
-                {visual.icon} {visual.label} · {schedule}
-                {duration ? ` · ${duration}` : ""}
-              </Text>
-              <Text style={styles.location}>{item.location}</Text>
-              <Text style={styles.description} numberOfLines={2}>
-                {item.description}
-              </Text>
-              {item.estimated_cost ? (
-                <Text style={styles.cost}>预估 ¥{item.estimated_cost}</Text>
-              ) : null}
-            </Pressable>
-            <View style={styles.actions}>
-              {(item.category === "food" || item.category === "hotel") && onRecommendPOI ? (
-                <Pressable
-                  style={[styles.actionBtn, styles.pickBtn, busy ? styles.actionDisabled : null]}
-                  disabled={busy}
-                  onPress={() => onRecommendPOI(item)}
-                >
-                  <Text style={styles.pickText}>选</Text>
-                </Pressable>
-              ) : null}
-              <Pressable
-                style={[styles.actionBtn, index === 0 || busy ? styles.actionDisabled : null]}
-                disabled={index === 0 || busy}
-                onPress={() => onMoveUp(item.id)}
-              >
-                <Text style={styles.actionText}>↑</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.actionBtn, index === items.length - 1 || busy ? styles.actionDisabled : null]}
-                disabled={index === items.length - 1 || busy}
-                onPress={() => onMoveDown(item.id)}
-              >
-                <Text style={styles.actionText}>↓</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.actionBtn, styles.deleteBtn, busy ? styles.actionDisabled : null]}
-                disabled={busy || items.length <= 1}
-                onPress={() => onDelete(item.id)}
-              >
-                <Text style={[styles.actionText, styles.deleteText]}>删</Text>
-              </Pressable>
-            </View>
-          </View>
-        );
-      })}
+      <Text style={styles.hint}>点击编辑详情；可用导航、美食/酒店/景点选择更新节点，↑↓ 调整顺序。</Text>
+      {displayItems.map((item, index) => renderRow(item, index))}
     </View>
   );
 }
@@ -119,6 +237,14 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     backgroundColor: "#FFFFFF",
     borderWidth: 1.5,
+    overflow: "hidden",
+    position: "relative",
+    marginBottom: 8,
+  },
+  rowRisk: {
+    backgroundColor: "#FFF7F7",
+    borderColor: "#EF4444",
+    borderWidth: 2,
   },
   dateCol: {
     width: 52,
@@ -132,35 +258,105 @@ const styles = StyleSheet.create({
   dateText: { color: "#FFFFFF", fontSize: 9, fontWeight: "900" },
   timeText: { color: "#FFFFFF", fontSize: 10, fontWeight: "900" },
   main: { flex: 1, paddingVertical: 2 },
-  header: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
-  itemTitle: { flex: 1, color: "#2A4266", fontSize: 12, fontWeight: "900" },
+  header: { minHeight: 20, flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8 },
+  itemTitle: { flex: 1, minWidth: 0, color: "#2A4266", fontSize: 12, lineHeight: 18, fontWeight: "900" },
   badge: {
     color: "#287CFF",
     backgroundColor: "#EEF6FF",
     borderRadius: 999,
     paddingHorizontal: 8,
-    paddingVertical: 3,
+    height: 20,
+    lineHeight: 20,
     fontSize: 9,
     fontWeight: "900",
     overflow: "hidden",
+    textAlign: "center",
+    flexShrink: 0,
   },
   meta: { marginTop: 4, color: "#527099", fontSize: 10, fontWeight: "800" },
   location: { marginTop: 3, color: "#287CFF", fontSize: 10, fontWeight: "800" },
   description: { marginTop: 3, color: "#7085A2", fontSize: 10, lineHeight: 15, fontWeight: "700" },
+  riskBar: {
+    marginTop: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: "#FEE2E2",
+    borderLeftWidth: 4,
+    borderLeftColor: "#EF4444",
+  },
+  riskLabel: { color: "#DC2626", fontSize: 10, fontWeight: "900" },
+  riskText: { flex: 1, color: "#B91C1C", fontSize: 10, lineHeight: 14, fontWeight: "800" },
+  dayWeatherCard: {
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 12,
+    backgroundColor: "#F2FFF9",
+    borderWidth: 1,
+    borderColor: "#C9F2DD",
+  },
+  dayWeatherCardWarn: { backgroundColor: "#FFF7ED", borderColor: "#FED7AA" },
+  dayWeatherTitle: { color: "#1A9D5C", fontSize: 11, fontWeight: "900" },
+  dayWeatherTitleWarn: { color: "#F97316" },
+  dayWeatherDetail: { marginTop: 3, color: "#2A7751", fontSize: 11, lineHeight: 15, fontWeight: "900" },
+  dayWeatherDetailWarn: { color: "#EA580C" },
+  dayWeatherAdvice: { marginTop: 2, color: "#4D8B6B", fontSize: 10, lineHeight: 14, fontWeight: "800" },
+  dayWeatherAdviceWarn: { color: "#F97316" },
   cost: { marginTop: 4, color: "#1B63FF", fontSize: 10, fontWeight: "900" },
-  actions: { gap: 4, justifyContent: "center" },
+  actions: { width: 72, gap: 4, justifyContent: "center" },
   actionBtn: {
-    width: 30,
-    height: 28,
+    width: 34,
+    height: 26,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#EEF6FF",
+  },
+  actionBtnWide: {
+    minHeight: 28,
+    paddingHorizontal: 6,
     borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#EEF6FF",
   },
   actionDisabled: { opacity: 0.35 },
-  actionText: { color: "#287CFF", fontSize: 12, fontWeight: "900" },
+  actionText: { color: "#287CFF", fontSize: 11, fontWeight: "900" },
   deleteBtn: { backgroundColor: "#FFF1F0" },
   deleteText: { color: "#E55353" },
+  navigateBtn: { backgroundColor: "#EAF4FF" },
+  navigateText: { color: "#287CFF", fontSize: 9, fontWeight: "900" },
   pickBtn: { backgroundColor: "#E8FFF3" },
-  pickText: { color: "#1A9D5C", fontSize: 11, fontWeight: "900" },
+  pickBtnHotel: { backgroundColor: "#F3E8FF" },
+  pickBtnSight: { backgroundColor: "#FFF4E8" },
+  pickText: { color: "#1A9D5C", fontSize: 9, fontWeight: "900" },
+  pickTextHotel: { color: "#8B5CF6", fontSize: 9, fontWeight: "900" },
+  pickTextSight: { color: "#F59E0B", fontSize: 9, fontWeight: "900" },
+  deletingOverlay: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(245, 248, 252, 0.82)",
+  },
+  deletingText: {
+    color: "#7A8798",
+    fontSize: 20,
+    fontWeight: "900",
+  },
 });
+
+const webDeletingOverlay =
+  Platform.OS === "web"
+    ? ({
+        backdropFilter: "blur(4px)",
+        WebkitBackdropFilter: "blur(4px)",
+      } as object)
+    : null;

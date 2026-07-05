@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
+from app.utils.city import resolve_search_city
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class AmapService:
         return bool(self.settings.amap_api_key)
 
     def search_poi(self, city: str, keywords: str, category: str = "food", limit: int = 8) -> list[dict[str, Any]]:
+        city = resolve_search_city(city)
         if not self.configured:
             return self._fallback_poi(city, keywords, category)
 
@@ -51,7 +53,11 @@ class AmapService:
                 if payload.get("status") != "1":
                     logger.warning("Amap POI search failed: %s", payload.get("info"))
                     return self._fallback_poi(city, keywords, category)
-                return payload.get("pois") or []
+                pois = payload.get("pois") or []
+                if not pois:
+                    logger.warning("Amap POI search empty for city=%s keyword=%s", city, keywords)
+                    return self._fallback_poi(city, keywords, category)
+                return pois
         except Exception as error:
             logger.warning("Amap POI search error: %s", error)
             return self._fallback_poi(city, keywords, category)
@@ -129,7 +135,6 @@ class AmapService:
                     "id": "mock-hotel-1",
                     "name": f"{city}市中心精选酒店",
                     "address": f"{city}核心区",
-                    "location": "116.397,39.918",
                     "biz_ext": {"rating": "4.6", "cost": "480"},
                     "type": "酒店",
                 },
@@ -137,7 +142,6 @@ class AmapService:
                     "id": "mock-hotel-2",
                     "name": f"{city}景观商务酒店",
                     "address": f"{city}景区附近",
-                    "location": "116.420,39.930",
                     "biz_ext": {"rating": "4.4", "cost": "360"},
                     "type": "酒店",
                 },
@@ -147,7 +151,6 @@ class AmapService:
                 "id": "mock-food-1",
                 "name": f"{city}{keywords}人气店",
                 "address": f"{city}美食街",
-                "location": "116.397,39.918",
                 "biz_ext": {"rating": "4.7", "cost": "120"},
                 "type": "餐饮",
             },
@@ -155,7 +158,6 @@ class AmapService:
                 "id": "mock-food-2",
                 "name": f"{city}老字号{keywords}",
                 "address": f"{city}老城区",
-                "location": "116.410,39.925",
                 "biz_ext": {"rating": "4.5", "cost": "95"},
                 "type": "餐饮",
             },

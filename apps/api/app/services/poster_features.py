@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from app.agent.graph import travel_agent_graph
+from app.agent.graph import call_tools, generate_plan, travel_agent_graph, validate_plan
 from app.models.schemas import (
     AcceptReplanRequest,
     ExecuteOrderRequest,
@@ -13,7 +13,9 @@ from app.models.schemas import (
     PaymentAuthorizationRequest,
     PlanComparison,
     PlanOption,
+    PrepareFromItineraryRequest,
     PrepareOrderRequest,
+    TravelQuote,
     ReplanProposal,
     ReplanRequest,
     SyncItem,
@@ -21,11 +23,14 @@ from app.models.schemas import (
     SystemSyncResult,
     TravelIncident,
     TravelOrder,
+    TravelIntent,
     TravelRequestBundle,
     TripReview,
 )
+from app.agent.refiner import itinerary_refiner
 from app.services.price_engine import price_engine
 from app.services.store import store
+from app.utils.emergency import build_adjust_instruction, incident_profile
 
 
 def _save(kind: str, record_id: str, user_id: str, payload) -> None:
@@ -34,9 +39,12 @@ def _save(kind: str, record_id: str, user_id: str, payload) -> None:
 
 class PlanComparisonService:
     def compare(self, request: TravelRequestBundle) -> PlanComparison:
-        base_message = self._compose_prompt(request)
-        response = travel_agent_graph.invoke(request.user_id, base_message)
-        base = response.itinerary
+        if request.document_ids:
+            base_message = self._compose_prompt(request)
+            response = travel_agent_graph.invoke(request.user_id, base_message)
+            base = response.itinerary
+        else:
+            base = self._build_itinerary_fast(request)
         if base is None:
             raise ValueError("failed to generate itinerary")
 
@@ -61,6 +69,28 @@ class PlanComparisonService:
     def get(self, comparison_id: str) -> PlanComparison | None:
         payload = store.get_record("comparison", comparison_id)
         return PlanComparison.model_validate(payload) if payload else None
+
+    def _build_itinerary_fast(self, request: TravelRequestBundle):
+        structured = request.structured
+        intent = TravelIntent(
+            origin=structured.origin or None,
+            destination=structured.destination or "目的地",
+            start_date=structured.start_date,
+            end_date=structured.end_date,
+            preferences=[*structured.preferences, *structured.tags, *structured.vehicles],
+            raw_text=request.text,
+        )
+        state = {
+            "user_id": request.user_id,
+            "message": request.text,
+            "intent": intent,
+            "retrieved_context": [],
+            "tool_results": {},
+        }
+        state = call_tools(state)
+        state = generate_plan(state)
+        state = validate_plan(state)
+        return state.get("itinerary")
 
     def _compose_prompt(self, request: TravelRequestBundle) -> str:
         structured = request.structured
@@ -162,6 +192,45 @@ class ExecutionCenter:
         _save("order", order.id, request.user_id, order)
         return order
 
+    def prepare_from_itinerary(self, request: PrepareFromItineraryRequest) -> TravelOrder:
+        itinerary = store.get_itinerary(request.itinerary_id)
+        if itinerary is None:
+            raise ValueError("itinerary not found")
+
+        if request.option is not None:
+            option = request.option.model_copy(update={"itinerary": itinerary})
+        else:
+            option = PlanOption(
+                title=itinerary.title,
+                strategy="balanced",
+                quote=TravelQuote(
+                    flight="待定",
+                    hotel="待定",
+                    local_transport="待定",
+                    total_price=0,
+                    duration_text="--",
+                    comfort_score=80,
+                    risk_level="low",
+                ),
+                recommendation=itinerary.summary,
+                itinerary=itinerary,
+            )
+
+        order = TravelOrder(
+            user_id=request.user_id,
+            comparison_id=option.id,
+            option=option,
+            steps=[
+                OrderStep(name="信息解析", detail="提取乘机人、日期、城市与偏好"),
+                OrderStep(name="平台匹配", detail="匹配航班、酒店、地图与日历平台"),
+                OrderStep(name="参数填表", detail="模拟填充 OTA、酒店和交通表单"),
+                OrderStep(name="等待授权", detail="等待用户一次性支付授权"),
+                OrderStep(name="结果回调", detail="回写订单号、酒店确认号和行程数据"),
+            ],
+        )
+        _save("order", order.id, request.user_id, order)
+        return order
+
     def authorize_payment(self, request: PaymentAuthorizationRequest) -> TravelOrder:
         order = self.get_order(request.order_id)
         if order is None:
@@ -210,14 +279,41 @@ class SystemSyncService:
 
         first = itinerary.items[0] if itinerary.items else None
         items = [
-            SyncItem(target="calendar", title="日历", detail=f"已同步 {len(itinerary.items)} 个行程事件"),
-            SyncItem(target="alarm", title="提醒", detail="已生成出发、值机、景点预约提醒"),
-            SyncItem(target="widget", title="桌面 Widget", detail="已生成下一站和风险提示卡片"),
-            SyncItem(target="memo", title="备忘录", detail=itinerary.summary),
+            SyncItem(
+                target="calendar",
+                title="日历",
+                detail=f"待写入 {len(itinerary.items)} 个行程事件",
+                status="ready",
+            ),
+            SyncItem(
+                target="alarm",
+                title="提醒",
+                detail="待创建出发通知提醒（提前 30 分钟）",
+                status="ready",
+            ),
+            SyncItem(
+                target="clock",
+                title="系统闹钟",
+                detail="待写入响铃闹钟（提前 30 分钟 + 提前 5 分钟）",
+                status="ready",
+            ),
+            SyncItem(
+                target="widget",
+                title="桌面组件",
+                detail="待启用通知栏行程卡",
+                status="ready",
+            ),
+            SyncItem(
+                target="memo",
+                title="备忘录",
+                detail="待写入行程摘要",
+                status="ready",
+            ),
             SyncItem(
                 target="map",
                 title="地图",
-                detail=f"已生成 {itinerary.intent.destination} 路线拓扑",
+                detail=f"待打开 {itinerary.intent.destination} 路线规划",
+                status="ready",
                 deeplink=f"amapuri://route/plan/?dname={first.location if first else itinerary.intent.destination}",
             ),
         ]
@@ -268,13 +364,19 @@ class GuardianService:
             next_check="15 分钟后",
         )
 
-    def simulate_incident(self, itinerary_id: str, kind: str = "flight_delay") -> TravelIncident:
+    def simulate_incident(
+        self,
+        itinerary_id: str,
+        kind: str = "flight_delay",
+        detail: str | None = None,
+    ) -> TravelIncident:
+        profile = incident_profile(kind)
         incident = TravelIncident(
             itinerary_id=itinerary_id,
-            kind=kind,  # type: ignore[arg-type]
-            severity="medium",
-            title="航班延误 35 分钟" if kind == "flight_delay" else "天气变化提醒",
-            detail="Agent 检测到关键节点受影响，建议重排午餐与景点顺序。",
+            kind=kind,
+            severity=profile["severity"],  # type: ignore[arg-type]
+            title=profile["title"],
+            detail=detail.strip() if detail and detail.strip() else profile["detail"],
         )
         _save("incident", incident.id, "demo-user", incident)
         return incident
@@ -283,35 +385,68 @@ class GuardianService:
         itinerary = store.get_itinerary(request.itinerary_id)
         if itinerary is None:
             raise ValueError("itinerary not found")
-        incident = None
+
+        kind = request.kind or "other"
+        detail = request.detail
+        incident: TravelIncident | None = None
         if request.incident_id:
             payload = store.get_record("incident", request.incident_id)
             incident = TravelIncident.model_validate(payload) if payload else None
-        incident = incident or self.simulate_incident(request.itinerary_id)
-        updated = deepcopy(itinerary)
-        updated.version = itinerary.version + 1
-        updated.warnings.append(incident.detail)
-        updated.items.append(
-            ItineraryItem(
-                day=1,
-                start_time="16:10",
-                end_time="16:40",
-                title="动态缓冲与交通重排",
-                location=itinerary.intent.destination,
-                category="alert",
-                description="根据异常事件自动插入缓冲时间，并重新排序受影响节点。",
-                risk_flags=["Agent 动态守护生成"],
-            )
+        if incident is None:
+            incident = self.simulate_incident(request.itinerary_id, kind, detail)
+        elif detail and detail.strip():
+            incident = incident.model_copy(update={"detail": detail.strip()})
+
+        profile = incident_profile(incident.kind)
+        instruction = build_adjust_instruction(incident.kind, incident.detail)
+        full_instruction = (
+            f"【突发情况：{profile['label']}】\n"
+            f"{instruction}\n\n"
+            "请仅局部调整受影响节点，不要增删节点，硬锚点（交通/会议/酒店）尽量保持不变。"
         )
+        response = itinerary_refiner.adjust_with_instruction(
+            request.itinerary_id,
+            full_instruction,
+            request.user_id,
+            persist=False,
+        )
+
+        updated = response.itinerary
+        updated.warnings = list(dict.fromkeys([*updated.warnings, incident.detail]))
+        changes = self._describe_item_changes(itinerary, updated, response.affected_item_ids)
+        if not changes:
+            changes = profile["changes"].split("|") if isinstance(profile.get("changes"), str) else profile.get("changes", [])
+        if isinstance(changes, str):
+            changes = [changes]
+
         proposal = ReplanProposal(
             itinerary_id=itinerary.id,
             incident=incident,
-            summary="检测到行程风险，建议增加缓冲并调整后续节点。",
-            changes=["插入 30 分钟交通缓冲", "后移晚餐/景点节点", "同步更新日历与提醒"],
+            summary=response.change_summary or f"已针对「{profile['label']}」生成局部调整方案",
+            changes=changes[:6],
             updated_itinerary=updated,
         )
         _save("proposal", proposal.id, request.user_id, proposal)
         return proposal
+
+    @staticmethod
+    def _describe_item_changes(
+        before: Itinerary,
+        after: Itinerary,
+        affected_ids: list[str],
+    ) -> list[str]:
+        before_map = {item.id: item for item in before.items}
+        changes: list[str] = []
+        for item_id in affected_ids:
+            previous = before_map.get(item_id)
+            current = next((item for item in after.items if item.id == item_id), None)
+            if previous is None or current is None:
+                continue
+            if previous.start_time != current.start_time or previous.end_time != current.end_time:
+                changes.append(f"《{current.title}》调整为 {current.start_time}–{current.end_time}")
+            elif previous.title != current.title or previous.location != current.location:
+                changes.append(f"《{current.title}》更新为 {current.location}")
+        return changes
 
     def accept(self, request: AcceptReplanRequest) -> Itinerary:
         payload = store.get_record("proposal", request.proposal_id)

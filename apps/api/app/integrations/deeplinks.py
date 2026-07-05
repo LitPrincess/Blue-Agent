@@ -19,22 +19,36 @@ def build_deeplinks(
     encoded_city = quote(city)
     encoded_keyword = quote(f"{city} {name}")
 
-    links: dict[str, str] = {
-        "amap": f"https://uri.amap.com/marker?position={lng},{lat}&name={encoded_name}" if lat and lng else "",
-        "ctrip": (
-            f"https://m.ctrip.com/webapp/hotel/hotellist?city={encoded_city}&keyword={encoded_name}"
-            if category == "hotel"
-            else f"https://m.ctrip.com/webapp/vacations/tour/list?keyword={encoded_keyword}"
-        ),
-        "meituan": f"imeituan://www.meituan.com/search?q={encoded_name}",
-        "dianping": f"dianping://searchshoplist?keyword={encoded_name}&city={encoded_city}",
-        "xiaohongshu": f"https://www.xiaohongshu.com/search_result?keyword={encoded_keyword}",
-    }
+    if lat and lng:
+        amap_link = (
+            f"androidamap://viewMap?sourceApplication=BlueMap&poiname={encoded_name}"
+            f"&lat={lat}&lon={lng}&dev=0"
+        )
+    else:
+        amap_link = f"androidamap://poi?sourceApplication=BlueMap&keywords={encoded_keyword}&dev=0"
+
+    hotel_h5 = f"https://m.ctrip.com/webapp/hotel/hotellist?city={encoded_city}&keyword={encoded_name}"
     if category == "hotel" and checkin and checkout:
-        links["ctrip"] = (
+        hotel_h5 = (
             f"https://m.ctrip.com/webapp/hotel/hotellist?city={encoded_city}"
             f"&checkin={checkin}&checkout={checkout}&keyword={encoded_name}"
         )
+    tour_h5 = f"https://m.ctrip.com/webapp/vacations/tour/list?keyword={encoded_keyword}"
+    ctrip_h5 = hotel_h5 if category == "hotel" else tour_h5
+
+    meituan_link = (
+        f"imeituan://www.meituan.com/hotel/search?q={encoded_keyword}"
+        if category == "hotel"
+        else f"imeituan://www.meituan.com/search?q={encoded_keyword}"
+    )
+
+    links: dict[str, str] = {
+        "amap": amap_link,
+        "ctrip": f"ctrip://wireless/h5?url={quote(ctrip_h5)}&type=2",
+        "meituan": meituan_link,
+        "dianping": f"dianping://searchshoplist?keyword={encoded_keyword}&city={encoded_city}",
+        "xiaohongshu": f"xhsdiscover://search/result?keyword={encoded_keyword}",
+    }
     return {key: value for key, value in links.items() if value}
 
 

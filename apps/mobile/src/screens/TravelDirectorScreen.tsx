@@ -1,16 +1,28 @@
-import { useEffect, useRef, useState } from "react";
-import { Alert, Dimensions, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Alert, Linking, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 
-import { AgentStatus } from "../components/AgentStatus";
+import { DynamicRefinePanel } from "../components/DynamicRefinePanel";
+import { ExecutionPanel } from "../components/ExecutionPanel";
+import {
+  buildExpenseLinesFromQuote,
+  ExpenseLine,
+  ExpenseStatsModal,
+  summarizeExpenseLines,
+} from "../components/ExpenseStatsModal";
 import { IntentAnalysisPanel } from "../components/IntentAnalysisPanel";
 import { IntentInputPanel, UploadedFile } from "../components/IntentInputPanel";
 import { MapTopologyBoard } from "../components/MapTopologyBoard";
-import { ItineraryTimeline } from "../components/ItineraryTimeline";
 import { draftFromItem, NodeEditDraft, NodeEditModal } from "../components/NodeEditModal";
 import { OptionPickerModal } from "../components/OptionPickerModal";
+import { PermissionPrimerModal } from "../components/PermissionPrimerModal";
+import { TopologyShell } from "../components/TopologyShell";
+import { BlueMapShell } from "../components/ui/BlueMapShell";
+import { MainTab } from "../components/ui/BottomNavBar";
+import { useToast } from "../components/ui/Toast";
 import {
   acceptReplan,
+  addNode,
   analyzeIntent,
   authorizePayment,
   buildTravelRequest,
@@ -19,10 +31,14 @@ import {
   deleteNode,
   executeOrder,
   getGuardianStatus,
+  getItineraryWeather,
   getPriceQuote,
   getTripReview,
   prepareOrder,
+  prepareOrderFromItinerary,
+  refineItinerary,
   reorderNodes,
+  requestEmergencyAdjust,
   requestReplan,
   searchRecommendations,
   smartUpdateNode,
@@ -30,61 +46,66 @@ import {
   syncSystem,
   uploadTravelDocument,
 } from "../services/api";
+import { readSyncedCalendarEvents } from "../services/deviceCalendarRead";
+import { syncItineraryToDeviceCalendar } from "../services/deviceCalendar";
+import {
+  openAndroidClockAlarm,
+  readSyncedClockAlarms,
+  resolveNextClockItem,
+  syncItineraryToDeviceClockAlarms,
+} from "../services/deviceClockAlarm";
+import { readSyncedMemo, syncItineraryToDeviceMemo } from "../services/deviceMemo";
+import { syncItineraryReminders } from "../services/deviceNotifications";
+import { enableTripWidgetNotification } from "../services/deviceTripWidget";
+import {
+  createDeviceSyncScaffold,
+  patchDeviceSyncResult,
+  persistDeviceSync,
+} from "../services/deviceSyncState";
+import { mergeDeviceSyncIntoResult, runFullDeviceSync } from "../services/deviceSyncOrchestrator";
+import { exportItineraryPdf } from "../services/exportTripPdf";
 import { formatItemDateLabel } from "../utils/dateUtils";
+import { buildAmapNavigateUrl, buildAmapWebNavigateUrl, sortItineraryItems } from "../utils/amapNavigation";
+import { openExternalUrl } from "../utils/openExternalApp";
+import { buildItineraryMemoText } from "../utils/platformDeeplinks";
+import { openNotificationSettings, openSystemCalendarApp, openSystemRemindersApp } from "../utils/deviceSystemLinks";
+import { riskTextForItem } from "../utils/riskUtils";
+import { resolveNextWidgetItem } from "../utils/widgetUtils";
 import {
   GuardianStatus,
   IntentAnalysis,
   Itinerary,
   ItineraryItem,
   ItineraryPriceQuote,
+  ItineraryWeatherResponse,
+  ItemWeatherInfo,
   PlanComparison,
   PlanOption,
   POICandidate,
   ReplanProposal,
+  SyncItem,
   SystemSyncResult,
   TravelOrder,
   TripReview,
 } from "../types";
 import { buildEffectiveMessage, defaultStructured, parseTravelFromText, StructuredFields } from "../utils/parseTravelInput";
 import { defaultTravelPreferences, TravelPreferences } from "../utils/travelPreferences";
+import { EmergencyKind } from "../utils/emergencyAdjustments";
+import { BluemapTheme as theme } from "../theme/bluemapTheme";
 
 const samplePrompt = "";
-const screenWidth = Dimensions.get("window").width;
 
-type Stage = "input" | "analyze" | "compare" | "order" | "guardian" | "review";
+type Stage = "input" | "analyze" | "compare" | "compareDetail" | "order" | "guardian" | "review" | "widget";
 
-const stageMeta: Array<{ id: Stage; title: string; subtitle: string }> = [
-  { id: "input", title: "D1 意图爆发", subtitle: "多模态输入" },
-  { id: "analyze", title: "D1 解析确认", subtitle: "五要素理解" },
-  { id: "compare", title: "D2 视觉转译", subtitle: "拓扑方案" },
-  { id: "order", title: "D3 跨端执行", subtitle: "参数化跳转" },
-  { id: "guardian", title: "D4 动态微调", subtitle: "异常重规划" },
-  { id: "review", title: "D5 回顾沉淀", subtitle: "记忆同步" },
-];
-
-const stageFlow = ["Input", "Perception", "Topology", "Linkage", "Guardian"];
-
-function topologyStats(itinerary: Itinerary) {
-  return itinerary.items.reduce(
-    (stats, item) => {
-      const type =
-        item.node_type ??
-        (item.category === "transport" || item.category === "meeting" || item.category === "hotel"
-          ? "hard_anchor"
-          : item.category === "food" || item.category === "sight"
-            ? "semi_anchor"
-            : "soft_task");
-      if (type === "hard_anchor") stats.hard += 1;
-      if (type === "semi_anchor") stats.semi += 1;
-      if (type === "soft_task") stats.soft += 1;
-      stats.risks += item.risk_flags.length;
-      return stats;
-    },
-    { hard: 0, semi: 0, soft: 0, risks: 0 },
-  );
+function stageToTab(stage: Stage): MainTab {
+  if (stage === "input" || stage === "analyze") return 0;
+  if (stage === "compare" || stage === "compareDetail" || stage === "widget" || stage === "review") return 1;
+  if (stage === "guardian") return 2;
+  return 3;
 }
 
 export function TravelDirectorScreen() {
+  const { showToast } = useToast();
   const [stage, setStage] = useState<Stage>("input");
   const [message, setMessage] = useState(samplePrompt);
   const [structured, setStructured] = useState<StructuredFields>(defaultStructured());
@@ -94,6 +115,8 @@ export function TravelDirectorScreen() {
   const [loading, setLoading] = useState(false);
   const [pageScrollEnabled, setPageScrollEnabled] = useState(true);
   const [nodeEditDraft, setNodeEditDraft] = useState<NodeEditDraft | null>(null);
+  const [nodeEditMode, setNodeEditMode] = useState<"edit" | "add">("edit");
+  const [nodeAddAfterId, setNodeAddAfterId] = useState<string | null>(null);
   const [nodeSaving, setNodeSaving] = useState(false);
   const pageScrollRef = useRef<ScrollView>(null);
   const mapTouchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -103,11 +126,19 @@ export function TravelDirectorScreen() {
   const [order, setOrder] = useState<TravelOrder | null>(null);
   const [itinerary, setItinerary] = useState<Itinerary | null>(null);
   const [syncResult, setSyncResult] = useState<SystemSyncResult | null>(null);
+  const [calendarEventCount, setCalendarEventCount] = useState(0);
+  const [deviceSyncBusy, setDeviceSyncBusy] = useState<SyncItem["target"] | null>(null);
+  const [expenseStatsVisible, setExpenseStatsVisible] = useState(false);
+  const [expenseLines, setExpenseLines] = useState<ExpenseLine[]>([]);
+  const [permissionPrimerVisible, setPermissionPrimerVisible] = useState(false);
+  const [pendingExecute, setPendingExecute] = useState(false);
   const [guardian, setGuardian] = useState<GuardianStatus | null>(null);
   const [proposal, setProposal] = useState<ReplanProposal | null>(null);
   const [review, setReview] = useState<TripReview | null>(null);
   const [analysis, setAnalysis] = useState<IntentAnalysis | null>(null);
   const [priceQuote, setPriceQuote] = useState<ItineraryPriceQuote | null>(null);
+  const [itineraryWeather, setItineraryWeather] = useState<ItineraryWeatherResponse | null>(null);
+  const [weatherSyncing, setWeatherSyncing] = useState(false);
   const [poiPickerVisible, setPoiPickerVisible] = useState(false);
   const [poiLoading, setPoiLoading] = useState(false);
   const [poiCandidates, setPoiCandidates] = useState<POICandidate[]>([]);
@@ -115,7 +146,7 @@ export function TravelDirectorScreen() {
   const [poiRecommendation, setPoiRecommendation] = useState("");
   const [poiPickerTitle, setPoiPickerTitle] = useState("多平台候选");
   const [poiContext, setPoiContext] = useState<{
-    category: "food" | "hotel";
+    category: "food" | "hotel" | "sight";
     keyword: string;
     day: number;
     start_time: string;
@@ -145,6 +176,52 @@ export function TravelDirectorScreen() {
   }, [itinerary?.id, itinerary?.version, itinerary?.items.length]);
 
   useEffect(() => {
+    if (priceQuote) {
+      setExpenseLines(buildExpenseLinesFromQuote(priceQuote));
+    } else {
+      setExpenseLines([]);
+    }
+  }, [priceQuote]);
+
+  useEffect(() => {
+    const target = itinerary ?? selectedOption?.itinerary ?? null;
+    if (!target?.id) {
+      setItineraryWeather(null);
+      return;
+    }
+    let cancelled = false;
+    setWeatherSyncing(true);
+    getItineraryWeather(target.id)
+      .then((data) => {
+        if (!cancelled) setItineraryWeather(data);
+      })
+      .catch(() => {
+        if (!cancelled) setItineraryWeather(null);
+      })
+      .finally(() => {
+        if (!cancelled) setWeatherSyncing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    itinerary?.id,
+    itinerary?.version,
+    selectedOption?.itinerary?.id,
+    selectedOption?.itinerary?.version,
+  ]);
+
+  const expenseSummary = useMemo(() => summarizeExpenseLines(expenseLines), [expenseLines]);
+  const poiSearching = poiLoading && poiCandidates.length === 0;
+  const itemWeatherMap = useMemo(() => {
+    const map: Record<string, ItemWeatherInfo> = {};
+    for (const entry of itineraryWeather?.item_weather ?? []) {
+      map[entry.item_id] = entry;
+    }
+    return map;
+  }, [itineraryWeather]);
+
+  useEffect(() => {
     const hints = parseTravelFromText(message);
     if (hints.tags.length) {
       setSelectedTags((current) => Array.from(new Set([...current, ...hints.tags])));
@@ -164,7 +241,7 @@ export function TravelDirectorScreen() {
   }
 
   async function openPOIPicker(context: {
-    category: "food" | "hotel";
+    category: "food" | "hotel" | "sight";
     keyword: string;
     day: number;
     start_time: string;
@@ -184,11 +261,16 @@ export function TravelDirectorScreen() {
     setPoiPickerTitle(
       context.category === "hotel"
         ? `推荐酒店 · ${keywordLabel(context.keyword)}`
-        : `推荐餐厅 · ${keywordLabel(context.keyword)}`,
+        : context.category === "sight"
+          ? `推荐景点 · ${keywordLabel(context.keyword)}`
+          : `推荐餐厅 · ${keywordLabel(context.keyword)}`,
     );
     setPoiPickerVisible(true);
     setPoiLoading(true);
     setPoiCandidates([]);
+    setPoiSummary("");
+    setPoiRecommendation("");
+    showToast("正在跨平台广泛搜索，通常需 10–30 秒，请稍候…", "info");
     try {
       const response = await searchRecommendations({
         city,
@@ -213,13 +295,19 @@ export function TravelDirectorScreen() {
   }
 
   function handleRecommendFromItem(item: ItineraryItem) {
-    const category = item.category === "hotel" ? "hotel" : "food";
+    setNodeEditDraft(null);
+    setNodeAddAfterId(null);
+    const category: "food" | "hotel" | "sight" =
+      item.category === "hotel" ? "hotel" : item.category === "sight" ? "sight" : "food";
+    const city = itinerary?.intent.destination || structured.destination;
     const keyword =
       category === "hotel"
-        ? itinerary?.intent.accommodation_area || `${itinerary?.intent.destination || structured.destination}酒店`
-        : extractFoodKeyword(item.title) !== "特色美食"
-          ? extractFoodKeyword(item.title)
-          : extractFoodKeyword(message);
+        ? itinerary?.intent.accommodation_area || `${city}酒店`
+        : category === "sight"
+          ? item.title.trim() || item.location.trim() || `${city}景点`
+          : extractFoodKeyword(item.title) !== "特色美食"
+            ? extractFoodKeyword(item.title)
+            : extractFoodKeyword(message);
     openPOIPicker({
       category,
       keyword,
@@ -273,15 +361,6 @@ export function TravelDirectorScreen() {
       near_lng: lastItem?.geo_lng ?? undefined,
     });
   }
-
-  const subtitle = loading
-    ? "Agent 正在执行当前阶段"
-    : order?.status === "completed"
-      ? "订票、酒店、地图和日历已进入同步阶段"
-      : comparison
-        ? `${comparison.options.length} 个候选方案已生成`
-        : "多模态输入 · 方案比对 · 跨端执行 · 动态守护";
-
 
   async function handleUpload() {
     const result = await DocumentPicker.getDocumentAsync({
@@ -357,7 +436,7 @@ export function TravelDirectorScreen() {
         response.comparison.options[0];
       setSelectedOption(recommended);
       setItinerary(recommended.itinerary);
-      setStage("compare");
+      setStage("compareDetail");
     } catch (error) {
       Alert.alert("方案生成失败", error instanceof Error ? error.message : "请确认后端已启动");
     } finally {
@@ -365,14 +444,40 @@ export function TravelDirectorScreen() {
     }
   }
 
+  function handleSelectPlanForTopology(option: PlanOption) {
+    setSelectedOption(option);
+    setItinerary(option.itinerary);
+    setStage("compareDetail");
+  }
+
+  useEffect(() => {
+    if (!itinerary?.id) {
+      setSyncResult(null);
+      return;
+    }
+    if (!syncResult || syncResult.itinerary_id !== itinerary.id) {
+      setSyncResult(createDeviceSyncScaffold(itinerary));
+    }
+  }, [itinerary?.id]);
+
   async function handlePrepare(option: PlanOption) {
-    if (!comparison) return;
+    if (!itinerary) return;
     setLoading(true);
     try {
-      setSelectedOption(option);
-      const response = await prepareOrder(comparison.id, option.id);
+      setSelectedOption({ ...option, itinerary });
+      let response;
+      if (comparison) {
+        try {
+          response = await prepareOrder(comparison.id, option.id);
+        } catch {
+          response = await prepareOrderFromItinerary(itinerary.id, { ...option, itinerary });
+        }
+      } else {
+        response = await prepareOrderFromItinerary(itinerary.id, { ...option, itinerary });
+      }
       setOrder(response.order);
       setItinerary(response.order.option.itinerary);
+      setSyncResult(createDeviceSyncScaffold(response.order.option.itinerary));
       setStage("order");
     } catch (error) {
       Alert.alert("订单准备失败", error instanceof Error ? error.message : "请稍后重试");
@@ -381,16 +486,249 @@ export function TravelDirectorScreen() {
     }
   }
 
+  function applyDeviceSyncPatch(target: SyncItem["target"], detail: string, status: SyncItem["status"]) {
+    if (!itinerary) return;
+    setSyncResult((current) => {
+      const next = patchDeviceSyncResult(current, itinerary, target, detail, status);
+      void persistDeviceSync(next);
+      return next;
+    });
+  }
+
+  async function handleSyncCalendar() {
+    if (!itinerary || deviceSyncBusy) return;
+    setDeviceSyncBusy("calendar");
+    try {
+      const result = await syncItineraryToDeviceCalendar(itinerary);
+      setCalendarEventCount(result.syncedCount);
+      const status = result.status === "synced" ? "synced" : result.status === "failed" ? "failed" : "ready";
+      applyDeviceSyncPatch("calendar", result.detail, status);
+      if (result.status === "synced") {
+        Alert.alert("日历已写入", `${result.detail}\n\n可在系统日历「蓝V出行」中查看。`, [
+          { text: "打开系统日历", onPress: () => void openSystemCalendarApp() },
+          { text: "好的" },
+        ]);
+      } else if (result.status === "permission-denied") {
+        Alert.alert("需要日历权限", result.detail, [
+          { text: "打开设置", onPress: () => void openNotificationSettings() },
+          { text: "取消", style: "cancel" },
+        ]);
+      } else {
+        Alert.alert("日历同步", result.detail);
+      }
+    } finally {
+      setDeviceSyncBusy(null);
+    }
+  }
+
+  async function handleSyncMemo() {
+    if (!itinerary || deviceSyncBusy) return;
+    setDeviceSyncBusy("memo");
+    const startDate = itinerary.intent.start_date ?? structured.startDate;
+    try {
+      const result = await syncItineraryToDeviceMemo(itinerary, startDate);
+      const status = result.status === "synced" ? "synced" : result.status === "failed" ? "failed" : "ready";
+      applyDeviceSyncPatch("memo", result.detail, status);
+      if (result.status === "synced" && Platform.OS === "android") {
+        Alert.alert("备忘录已写入", result.detail, [
+          {
+            text: "分享到笔记 App",
+            onPress: () => {
+              void Share.share({
+                message: buildItineraryMemoText(itinerary, startDate),
+                title: `${itinerary.title} · 行程备忘`,
+              });
+            },
+          },
+          { text: "打开日历查看", onPress: () => void openSystemCalendarApp() },
+          { text: "好的" },
+        ]);
+      } else if (result.status === "synced" && Platform.OS === "ios") {
+        Alert.alert("备忘录已写入", result.detail, [
+          { text: "打开提醒事项", onPress: () => void openSystemRemindersApp() },
+          { text: "好的" },
+        ]);
+      } else if (result.status === "permission-denied") {
+        Alert.alert("需要权限", result.detail, [
+          { text: "打开设置", onPress: () => void openNotificationSettings() },
+          { text: "取消", style: "cancel" },
+        ]);
+      } else {
+        Alert.alert(result.status === "synced" ? "备忘录已写入" : "备忘录同步", result.detail);
+      }
+    } finally {
+      setDeviceSyncBusy(null);
+    }
+  }
+
+  async function handleSyncAlarm() {
+    if (!itinerary || deviceSyncBusy) return;
+    setDeviceSyncBusy("alarm");
+    try {
+      const result = await syncItineraryReminders(itinerary);
+      const status = result.status === "synced" ? "synced" : result.status === "failed" ? "failed" : "ready";
+      applyDeviceSyncPatch("alarm", result.detail, status);
+      if (result.status === "permission-denied" || result.status === "unsupported") {
+        Alert.alert("提醒同步", result.detail, [
+          ...(result.status === "permission-denied"
+            ? [{ text: "打开设置", onPress: () => void openNotificationSettings() }]
+            : []),
+          { text: "知道了" },
+        ]);
+      } else {
+        Alert.alert(result.status === "synced" ? "提醒已写入" : "提醒同步", result.detail);
+      }
+    } finally {
+      setDeviceSyncBusy(null);
+    }
+  }
+
+  async function handleSyncClock() {
+    if (!itinerary || deviceSyncBusy) return;
+    setDeviceSyncBusy("clock");
+    const startDate = itinerary.intent.start_date ?? structured.startDate;
+    try {
+      const result = await syncItineraryToDeviceClockAlarms(itinerary);
+      const status = result.status === "synced" ? "synced" : result.status === "failed" ? "failed" : "ready";
+      applyDeviceSyncPatch("clock", result.detail, status);
+      if (result.status === "synced") {
+        const nextItem = resolveNextClockItem(itinerary.items, startDate);
+        const buttons: { text: string; onPress?: () => void }[] = [{ text: "好的" }];
+        if (Platform.OS === "android" && nextItem) {
+          const [hour, minute] = nextItem.start_time.split(":").map((value) => Number.parseInt(value, 10));
+          const alarmMinute = minute - 30;
+          const alarmHour = alarmMinute < 0 ? hour - 1 : hour;
+          const normalizedMinute = alarmMinute < 0 ? alarmMinute + 60 : alarmMinute;
+          const normalizedHour = alarmHour < 0 ? alarmHour + 24 : alarmHour;
+          buttons.unshift({
+            text: "打开时钟确认",
+            onPress: () => {
+              void openAndroidClockAlarm(
+                normalizedHour,
+                normalizedMinute,
+                `蓝V出行 · ${nextItem.title}`,
+              );
+            },
+          });
+        } else if (Platform.OS === "ios") {
+          buttons.unshift({ text: "打开系统日历", onPress: () => void openSystemCalendarApp() });
+        }
+        Alert.alert("系统闹钟已写入", result.detail, buttons);
+      } else if (result.status === "permission-denied") {
+        Alert.alert("需要权限", result.detail, [
+          { text: "打开设置", onPress: () => void openNotificationSettings() },
+          { text: "取消", style: "cancel" },
+        ]);
+      } else if (result.status === "unsupported") {
+        Alert.alert("系统闹钟", result.detail);
+      } else {
+        Alert.alert("系统闹钟", result.detail);
+      }
+    } finally {
+      setDeviceSyncBusy(null);
+    }
+  }
+
+  async function handleSyncWidget() {
+    if (!itinerary || deviceSyncBusy) return;
+    setDeviceSyncBusy("widget");
+    const startDate = itinerary.intent.start_date ?? structured.startDate;
+    const nextItem = resolveNextWidgetItem(itinerary.items, startDate);
+    try {
+      const result = await enableTripWidgetNotification(
+        itinerary,
+        startDate,
+        nextItem ? riskTextForItem(nextItem, undefined) : undefined,
+      );
+      const status = result.status === "synced" ? "synced" : result.status === "failed" ? "failed" : "ready";
+      applyDeviceSyncPatch("widget", result.detail, status);
+      if (result.status === "permission-denied" || result.status === "unsupported") {
+        Alert.alert("通知栏行程卡", result.detail, [
+          ...(result.status === "permission-denied"
+            ? [{ text: "打开设置", onPress: () => void openNotificationSettings() }]
+            : []),
+          { text: "知道了" },
+        ]);
+      } else {
+        Alert.alert(result.status === "synced" ? "行程卡已推送" : "通知栏行程卡", result.detail);
+      }
+    } finally {
+      setDeviceSyncBusy(null);
+    }
+  }
+
+  async function handleReadSystemData() {
+    if (!itinerary) return;
+    const [calendarRead, memoRead, clockRead] = await Promise.all([
+      readSyncedCalendarEvents(itinerary.id),
+      readSyncedMemo(itinerary.id),
+      readSyncedClockAlarms(itinerary.id),
+    ]);
+    setCalendarEventCount(calendarRead.eventCount);
+    Alert.alert("系统数据验证", `${calendarRead.detail}\n${memoRead.detail}\n${clockRead.detail}`);
+  }
+
+  function handleOpenSyncItem(target: SyncItem["target"]) {
+    if (target === "calendar") void handleSyncCalendar();
+    else if (target === "memo") void handleSyncMemo();
+    else if (target === "alarm") void handleSyncAlarm();
+    else if (target === "clock") void handleSyncClock();
+    else if (target === "widget") void handleSyncWidget();
+    else if (target === "map") Alert.alert("地图", "请在智能跳转区打开高德路线。");
+  }
+
+  async function handleRefreshWeather() {
+    const target = itinerary ?? selectedOption?.itinerary ?? null;
+    if (!target?.id) return;
+    setWeatherSyncing(true);
+    try {
+      const data = await getItineraryWeather(target.id);
+      setItineraryWeather(data);
+      showToast(data.available ? "天气已同步" : data.summary || "暂无天气数据", data.available ? "success" : "info");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "天气同步失败", "error");
+    } finally {
+      setWeatherSyncing(false);
+    }
+  }
+
+  async function handleExportPdf() {
+    if (!itinerary) return;
+    setLoading(true);
+    try {
+      const result = await exportItineraryPdf(itinerary, review);
+      if (result.status === "failed") {
+        Alert.alert("导出 PDF 失败", result.detail);
+      } else if (result.status === "unsupported") {
+        Alert.alert("导出 PDF", result.detail);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleExecute() {
-    if (!order) return;
+    if (!order || !itinerary) return;
     setLoading(true);
     try {
       const authorized = await authorizePayment(order.id);
       const executed = await executeOrder(authorized.order.id);
       setOrder(executed.order);
-      setItinerary(executed.order.option.itinerary);
-      const synced = await syncSystem(executed.order.option.itinerary.id, executed.order.id);
-      setSyncResult(synced.sync);
+      const executedItinerary = executed.order.option.itinerary;
+      setItinerary(executedItinerary);
+      const synced = await syncSystem(executedItinerary.id, executed.order.id);
+      const startDate = executedItinerary.intent.start_date ?? structured.startDate;
+      const outcomes = await runFullDeviceSync(
+        executedItinerary,
+        startDate,
+        resolveNextWidgetItem,
+        (item) => riskTextForItem(item, undefined),
+        {},
+      );
+      const merged = mergeDeviceSyncIntoResult(synced.sync, outcomes);
+      setSyncResult(merged);
+      void persistDeviceSync(merged);
+      setCalendarEventCount(outcomes.calendarSync.syncedCount);
       setStage("guardian");
     } catch (error) {
       Alert.alert("执行失败", error instanceof Error ? error.message : "请稍后重试");
@@ -404,7 +742,9 @@ export function TravelDirectorScreen() {
     setLoading(true);
     try {
       const incident = await simulateIncident(itinerary.id);
-      const nextProposal = await requestReplan(itinerary.id, incident.incident.id);
+      const nextProposal = await requestReplan(itinerary.id, {
+        incidentId: incident.incident.id,
+      });
       const status = await getGuardianStatus(itinerary.id);
       setGuardian(status.guardian);
       setProposal(nextProposal.proposal);
@@ -483,13 +823,109 @@ export function TravelDirectorScreen() {
   }
 
   function handleEditNode(item: ItineraryItem) {
+    setNodeEditMode("edit");
+    setNodeAddAfterId(null);
     setNodeEditDraft(draftFromItem(item));
   }
 
+  function suggestEndTime(startTime: string) {
+    const match = startTime.trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return "12:00";
+    const total = Number(match[1]) * 60 + Number(match[2]) + 90;
+    const hours = Math.floor(total / 60) % 24;
+    const minutes = total % 60;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  }
+
+  function handleAddAfterItem(item: ItineraryItem) {
+    setNodeEditMode("add");
+    setNodeAddAfterId(item.id);
+    setNodeEditDraft({
+      id: "",
+      title: "",
+      start_time: suggestEndTime(item.end_time || item.start_time),
+      end_time: suggestEndTime(suggestEndTime(item.end_time || item.start_time)),
+      location: item.location || "",
+      category: "free",
+      day: item.day,
+    });
+  }
+
+  function handleDeleteItem(item: ItineraryItem) {
+    if (!itinerary) return;
+    Alert.alert("确认删除", `确定删除「${item.title}」？Agent 将联动调整剩余行程。`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "删除",
+        style: "destructive",
+        onPress: async () => {
+          setNodeSaving(true);
+          try {
+            const response = await deleteNode(itinerary.id, item.id);
+            if (response.itinerary) await applyItineraryUpdate(response.itinerary);
+            if (nodeEditDraft?.id === item.id) setNodeEditDraft(null);
+            Alert.alert("已删除", response.change_summary || "节点已删除。");
+          } catch (error) {
+            Alert.alert("删除失败", error instanceof Error ? error.message : "请稍后重试");
+          } finally {
+            setNodeSaving(false);
+          }
+        },
+      },
+    ]);
+  }
+
+  async function handleNavigateSegment(from: ItineraryItem, to: ItineraryItem) {
+    const nativeUrl = buildAmapNavigateUrl(to, from);
+    const webUrl = buildAmapWebNavigateUrl(to, from);
+    try {
+      await openExternalUrl(nativeUrl, webUrl);
+    } catch {
+      Alert.alert("跳转失败", "请确认已安装高德地图。");
+    }
+  }
+
+  function handleNavigateFromEdit() {
+    if (!nodeEditDraft || !itinerary) return;
+    const sorted = sortItineraryItems(itinerary.items);
+    const index = sorted.findIndex((item) => item.id === nodeEditDraft.id);
+    const current = index >= 0 ? sorted[index] : null;
+    if (!current) return;
+    if (index <= 0) {
+      void (async () => {
+        try {
+          await openExternalUrl(buildAmapNavigateUrl(current), buildAmapWebNavigateUrl(current));
+        } catch {
+          Alert.alert("跳转失败", "请确认已安装高德地图。");
+        }
+      })();
+      return;
+    }
+    void handleNavigateSegment(sorted[index - 1], current);
+  }
+
   async function handleSaveNodeEdit() {
-    if (!nodeEditDraft) return;
+    if (!nodeEditDraft || !itinerary) return;
     setNodeSaving(true);
     try {
+      if (nodeEditMode === "add") {
+        const response = await addNode(itinerary.id, {
+          day: nodeEditDraft.day ?? 1,
+          start_time: nodeEditDraft.start_time.trim(),
+          end_time: suggestEndTime(nodeEditDraft.start_time.trim()),
+          title: nodeEditDraft.title.trim() || undefined,
+          location: nodeEditDraft.location.trim() || undefined,
+          category: nodeEditDraft.category ?? "free",
+          insert_after_item_id: nodeAddAfterId ?? undefined,
+          instruction: "请联动调整相邻节点的时间、交通缓冲与地点描述。",
+        });
+        if (response.itinerary) await applyItineraryUpdate(response.itinerary);
+        setNodeEditDraft(null);
+        setNodeAddAfterId(null);
+        Alert.alert("节点已添加", response.change_summary || "新节点已加入行程。");
+        return;
+      }
+
       const response = await handleSmartUpdateNode(
         nodeEditDraft.id,
         {
@@ -507,7 +943,7 @@ export function TravelDirectorScreen() {
         `${response?.change_summary || "修改已同步到行程与地图。"}\n\n共联动 ${affected} 个节点。`,
       );
     } catch (error) {
-      Alert.alert("保存失败", error instanceof Error ? error.message : "请稍后重试");
+      Alert.alert(nodeEditMode === "add" ? "添加失败" : "保存失败", error instanceof Error ? error.message : "请稍后重试");
     } finally {
       setNodeSaving(false);
     }
@@ -576,366 +1012,369 @@ export function TravelDirectorScreen() {
     mapTouchTimer.current = setTimeout(() => setPageScrollEnabled(true), 350);
   }
 
+  async function handleEmergencyAdjust(kind: EmergencyKind, detail?: string) {
+    if (!itinerary) return;
+    setLoading(true);
+    try {
+      const response = await requestEmergencyAdjust(itinerary.id, kind, detail);
+      setProposal(response.proposal);
+      const status = await getGuardianStatus(itinerary.id);
+      setGuardian(status.guardian);
+    } catch (error) {
+      Alert.alert("调整失败", error instanceof Error ? error.message : "请稍后重试");
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleRefineChat(instruction: string) {
+    if (!itinerary) return "请先生成行程。";
+    const response = await refineItinerary(itinerary.id, instruction);
+    if (response.itinerary) await applyItineraryUpdate(response.itinerary);
+    return response.reply;
+  }
+
+  const mainTab = stageToTab(stage);
+  const isDarkShell = stage === "order";
+
+  function handleMainTabChange(tab: MainTab) {
+    if (tab === 0) {
+      setStage(analysis ? "analyze" : "input");
+      return;
+    }
+    if (tab === 1) {
+      if (itinerary) {
+        setStage(stage === "compare" ? "compare" : "compareDetail");
+        return;
+      }
+      if (comparison) {
+        setStage("compare");
+        return;
+      }
+      Alert.alert("请先输入", "完成意图输入并生成候选方案后，再进入时空拓扑。");
+      return;
+    }
+    if (tab === 2) {
+      if (itinerary) {
+        setStage("guardian");
+        return;
+      }
+      Alert.alert("暂无行程", "请先生成行程后再进入动态微调。");
+      return;
+    }
+    if (order) {
+      setStage("order");
+      return;
+    }
+    if (itinerary && selectedOption) {
+      void handlePrepare(selectedOption);
+      return;
+    }
+    Alert.alert("请先确认方案", "请在时空拓扑页确认方案并准备跨端执行。");
+  }
+
+  function handlePermissionPrimerConfirm() {
+    setPermissionPrimerVisible(false);
+    if (pendingExecute) {
+      setPendingExecute(false);
+      void handleExecute();
+    }
+  }
+
+  const topologyItinerary = itinerary ?? selectedOption?.itinerary ?? null;
+  const startDateIso = topologyItinerary?.intent.start_date ?? structured.startDate;
+
   return (
-    <ScrollView
-      ref={pageScrollRef}
-      style={styles.page}
-      contentContainerStyle={styles.pageContent}
-      scrollEnabled={pageScrollEnabled}
-      nestedScrollEnabled
-    >
-      <View style={styles.phoneFrame}>
-        <View style={styles.homeCard}>
-          <View style={styles.bgOrbLeft} />
-          <View style={styles.bgOrbRight} />
+    <View style={styles.page}>
+      <BlueMapShell
+        dark={isDarkShell}
+        currentTab={mainTab}
+        onTabChange={handleMainTabChange}
+        scrollEnabled={pageScrollEnabled}
+        scrollRef={pageScrollRef}
+        contentContainerStyle={isDarkShell ? styles.shellContentDark : undefined}
+      >
+        {stage === "input" ? (
+          <IntentInputPanel
+              message={message}
+              onMessageChange={setMessage}
+              structured={structured}
+              setStructured={setStructured}
+              travelPreferences={travelPreferences}
+              onTravelPreferencesChange={setTravelPreferences}
+              uploads={uploads}
+              onUploadPress={handleUpload}
+              onAnalyze={handleAnalyze}
+              loading={loading}
+            intentActions={analysis?.five_elements.actions}
+          />
+        ) : null}
 
-          <View style={styles.pageHead}>
-            <View style={styles.backBtn}>
-              <Text style={styles.backText}>‹</Text>
-            </View>
-            <View style={styles.titleBlock}>
-              <View style={styles.titleRow}>
-                <Text style={styles.heading}>Blue-Map 编排者</Text>
-                <Text style={styles.titleBadge}>AIGC Agent</Text>
-              </View>
-              <Text style={styles.subheading} numberOfLines={2}>
-                意图爆发 · 视觉转译 · 动态微调 · 跨端执行
-              </Text>
-            </View>
-          </View>
+        {stage === "analyze" && analysis ? (
+          <IntentAnalysisPanel
+            analysis={analysis}
+            loading={loading}
+            onConfirm={handleCompare}
+            onBack={() => setStage("input")}
+          />
+        ) : null}
 
-          <View style={styles.flowRail}>
-            {stageFlow.map((item, index) => (
-              <View key={item} style={styles.flowStep}>
-                <Text style={styles.flowIndex}>{index + 1}</Text>
-                <Text style={styles.flowText}>{item}</Text>
-              </View>
-            ))}
-          </View>
-
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.stageTabs}>
-            {stageMeta.map((item, index) => (
-              <Pressable key={item.id} style={[styles.stageTab, stage === item.id ? styles.stageTabActive : null]} onPress={() => setStage(item.id)}>
-                <Text style={[styles.stageIndex, stage === item.id ? styles.stageIndexActive : null]}>{index + 1}</Text>
-                <Text style={[styles.stageTitle, stage === item.id ? styles.stageTitleActive : null]}>{item.title}</Text>
-                <Text style={styles.stageSub}>{item.subtitle}</Text>
+        {stage === "compare" ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>候选拓扑方案</Text>
+            {comparison?.options.map((option) => (
+              <Pressable
+                key={option.id}
+                style={[styles.optionCard, selectedOption?.id === option.id ? styles.optionCardActive : null]}
+                onPress={() => handleSelectPlanForTopology(option)}
+              >
+                <View style={styles.optionHeader}>
+                  <Text style={styles.optionTitle}>{option.title}</Text>
+                  <Text style={styles.price}>¥{option.quote.total_price}</Text>
+                </View>
+                <Text style={styles.summary}>{option.recommendation}</Text>
+                <View style={styles.metrics}>
+                  <Text style={styles.metric}>耗时 {option.quote.duration_text}</Text>
+                  <Text style={styles.metric}>舒适 {option.quote.comfort_score}</Text>
+                  <Text style={styles.metric}>风险 {option.quote.risk_level}</Text>
+                </View>
+                <Text style={styles.warning}>{option.risks.join(" · ")}</Text>
               </Pressable>
             ))}
-          </ScrollView>
+          </View>
+        ) : null}
 
-          <AgentStatus loading={loading} subtitle={subtitle} />
+        {(stage === "compareDetail" || stage === "widget") && topologyItinerary ? (
+          <TopologyShell
+            itinerary={topologyItinerary}
+            city={structured.destination}
+            weather={itineraryWeather}
+            weatherLoading={weatherSyncing}
+            onRefreshWeather={() => void handleRefreshWeather()}
+            showConfirmCta={Boolean(selectedOption)}
+            confirmLoading={loading}
+            confirmLabel="确认此方案并进入跨端执行  ›"
+            onConfirm={() => {
+              if (selectedOption) void handlePrepare(selectedOption);
+            }}
+            onGoRefine={() => setStage("guardian")}
+          >
+            <MapTopologyBoard
+              itinerary={topologyItinerary}
+              city={structured.destination}
+              startDate={startDateIso}
+              itemWeather={itemWeatherMap}
+              busy={nodeSaving || poiLoading}
+              poiSearching={poiSearching}
+              onUpdateNode={async (itemId, payload) => {
+                const item = topologyItinerary.items.find((entry) => entry.id === itemId);
+                const instruction = item
+                  ? `用户拖动了「${item.title}」的地图位置，请检查地点描述与后续交通时间是否需要联动调整。`
+                  : undefined;
+                await handleSmartUpdateNode(itemId, payload, instruction, { silent: true });
+              }}
+              onEditItem={handleEditNode}
+              onNavigateSegment={handleNavigateSegment}
+              onDeleteItem={handleDeleteItem}
+              onAddAfterItem={handleAddAfterItem}
+              onRecommendPOI={handleRecommendFromItem}
+              onMapInteractionChange={handleMapInteraction}
+            />
+          </TopologyShell>
+        ) : null}
 
-          {stage === "input" ? (
-            <View style={styles.section}>
-              <IntentInputPanel
-                message={message}
-                onMessageChange={setMessage}
-                structured={structured}
-                setStructured={setStructured}
-                travelPreferences={travelPreferences}
-                onTravelPreferencesChange={setTravelPreferences}
-                uploads={uploads}
-                onUploadPress={handleUpload}
-                onAnalyze={handleAnalyze}
-                loading={loading}
-              />
-            </View>
-          ) : null}
+        {stage === "guardian" && topologyItinerary ? (
+          <DynamicRefinePanel
+            itinerary={topologyItinerary}
+            startDate={startDateIso}
+            syncResult={syncResult}
+            guardian={guardian}
+            proposal={proposal}
+            loading={loading}
+            onEmergencyAdjust={handleEmergencyAdjust}
+            onAcceptReplan={handleAcceptReplan}
+            onGoExecution={() => setStage("order")}
+            onRefineChat={handleRefineChat}
+            onQuickRecommendFood={() => handleQuickRecommend("food")}
+            onQuickRecommendHotel={() => handleQuickRecommend("hotel")}
+            onUpload={handleUpload}
+            poiSearching={poiSearching}
+          />
+        ) : null}
 
-          {stage === "analyze" && analysis ? (
-            <View style={styles.section}>
-              <IntentAnalysisPanel
-                analysis={analysis}
-                loading={loading}
-                onConfirm={handleCompare}
-                onBack={() => setStage("input")}
-              />
-            </View>
-          ) : null}
+        {stage === "order" && order && itinerary ? (
+          <ExecutionPanel
+            order={order}
+            itinerary={itinerary}
+            syncResult={syncResult}
+            startDate={startDateIso}
+            loading={loading || Boolean(deviceSyncBusy)}
+            calendarEventCount={calendarEventCount}
+            priceQuote={priceQuote}
+            expenseTotal={expenseLines.length ? expenseSummary.total : null}
+            expenseBreakdown={expenseLines.length ? expenseSummary : null}
+            weatherSummary={itineraryWeather?.summary ?? null}
+            itemWeather={itemWeatherMap}
+            onRefreshWeather={() => void handleRefreshWeather()}
+            onExecute={handleExecute}
+            onSyncCalendar={handleSyncCalendar}
+            onSyncAlarm={handleSyncAlarm}
+            onSyncClock={handleSyncClock}
+            onSyncWidget={handleSyncWidget}
+            onSyncMemo={handleSyncMemo}
+            onReadSystemData={handleReadSystemData}
+            onOpenSyncItem={handleOpenSyncItem}
+            onShareTrip={() => {
+              void Share.share({
+                message: buildItineraryMemoText(itinerary, startDateIso),
+                title: itinerary.title,
+              });
+            }}
+            onExportPdf={() => void handleExportPdf()}
+            onExpenseStats={() => setExpenseStatsVisible(true)}
+            onGoTopology={() => setStage("compareDetail")}
+            onGoRefine={() => setStage("guardian")}
+          />
+        ) : null}
 
-          {stage === "compare" ? (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>视觉转译 · 候选拓扑</Text>
-              {comparison?.options.map((option) => (
-                <Pressable key={option.id} style={[styles.optionCard, selectedOption?.id === option.id ? styles.optionCardActive : null]} onPress={() => handlePrepare(option)}>
-                  <View style={styles.optionHeader}>
-                    <Text style={styles.optionTitle}>{option.title}</Text>
-                    <Text style={styles.price}>¥{option.quote.total_price}</Text>
-                  </View>
-                  <Text style={styles.summary}>{option.recommendation}</Text>
-                  <View style={styles.metrics}>
-                    <Text style={styles.metric}>耗时 {option.quote.duration_text}</Text>
-                    <Text style={styles.metric}>舒适 {option.quote.comfort_score}</Text>
-                    <Text style={styles.metric}>风险 {option.quote.risk_level}</Text>
-                  </View>
-                  <Text style={styles.warning}>{option.risks.join(" · ")}</Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : null}
-
-          {stage === "order" ? (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>跨端执行 · 参数化动作</Text>
-              {order ? (
-                <>
-                  <View style={styles.summaryCard}>
-                    <Text style={styles.panelTitle}>{order.option.title}</Text>
-                    <Text style={styles.summary}>{order.option.quote.flight}</Text>
-                    <Text style={styles.summary}>{order.option.quote.hotel}</Text>
-                    <Text style={styles.price}>总价 ¥{order.option.quote.total_price}</Text>
-                  </View>
-                  {order.steps.map((step) => (
-                    <View key={step.name} style={styles.stepCard}>
-                      <Text style={styles.stepStatus}>{step.status === "done" ? "✓" : "○"}</Text>
-                      <View style={styles.flex}>
-                        <Text style={styles.stepTitle}>{step.name}</Text>
-                        <Text style={styles.summary}>{step.detail}</Text>
-                      </View>
-                    </View>
-                  ))}
-                  <Pressable style={styles.cta} onPress={handleExecute} disabled={loading}>
-                    <Text style={styles.ctaText}>{loading ? "Agent 正在并行执行..." : "授权支付并同步执行  ›"}</Text>
-                  </Pressable>
-                </>
-              ) : null}
-            </View>
-          ) : null}
-
-          {stage === "guardian" ? (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>动态微调 · 守护重排</Text>
-              {syncResult ? (
-                <View style={styles.entityGrid}>
-                  {syncResult.items.map((item) => (
-                    <View key={item.target} style={styles.entityPill}>
-                      <Text style={styles.entityLabel}>{item.title}</Text>
-                      <Text style={styles.entityValue}>{item.detail}</Text>
-                    </View>
-                  ))}
-                </View>
-              ) : null}
-              <Pressable style={styles.secondaryCta} onPress={handleGuardian} disabled={loading}>
-                <Text style={styles.secondaryCtaText}>模拟航班延误并生成重规划</Text>
-              </Pressable>
-              {guardian?.incidents.map((incident) => (
-                <Text key={incident.id} style={styles.warning}>{incident.title}：{incident.detail}</Text>
-              ))}
-              {proposal ? (
-                <View style={styles.summaryCard}>
-                  <Text style={styles.panelTitle}>{proposal.summary}</Text>
-                  {proposal.changes.map((change) => (
-                    <Text key={change} style={styles.summary}>• {change}</Text>
-                  ))}
-                  <Pressable style={styles.cta} onPress={handleAcceptReplan}>
-                    <Text style={styles.ctaText}>确认更新行程</Text>
-                  </Pressable>
-                </View>
-              ) : null}
-              <Pressable style={styles.cta} onPress={handleReview} disabled={loading}>
-                <Text style={styles.ctaText}>生成行程回顾  ›</Text>
-              </Pressable>
-            </View>
-          ) : null}
-
-          {stage === "review" ? (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>回顾与沉淀</Text>
-              {review ? (
-                <View style={styles.summaryCard}>
-                  <Text style={styles.panelTitle}>行程回顾</Text>
-                  <Text style={styles.summary}>{review.summary}</Text>
-                  <Text style={styles.price}>预算合计 ¥{review.budget_total}</Text>
-                  <Text style={styles.panelTitle}>偏好记忆</Text>
-                  {review.preference_memory.map((item) => <Text key={item} style={styles.summary}>• {item}</Text>)}
-                  <Text style={styles.panelTitle}>下次建议</Text>
-                  {review.next_trip_suggestions.map((item) => <Text key={item} style={styles.summary}>• {item}</Text>)}
-                </View>
-              ) : null}
-            </View>
-          ) : null}
-
-          {itinerary ? (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>时空拓扑看板</Text>
-              <TopologySummary itinerary={itinerary} />
-              {priceQuote ? (
-                <View style={styles.priceCard}>
-                  <Text style={styles.priceCardTitle}>真实费用估算</Text>
-                  <Text style={styles.priceTotal}>¥{priceQuote.total}</Text>
-                  <View style={styles.priceMetrics}>
-                    <Text style={styles.priceMetric}>交通 ¥{priceQuote.transport}</Text>
-                    <Text style={styles.priceMetric}>餐饮 ¥{priceQuote.food}</Text>
-                    <Text style={styles.priceMetric}>住宿 ¥{priceQuote.hotel}</Text>
-                  </View>
-                  <Text style={styles.priceSource}>
-                    路线来源：{priceQuote.data_sources.join("、") || "估算"} · 市内耗时 {priceQuote.duration_text}
+        {stage === "review" ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>回顾与沉淀</Text>
+            {review ? (
+              <View style={styles.summaryCard}>
+                <Text style={styles.panelTitle}>行程回顾</Text>
+                <Text style={styles.summary}>{review.summary}</Text>
+                <Text style={styles.price}>预算合计 ¥{review.budget_total}</Text>
+                <Text style={styles.panelTitle}>偏好记忆</Text>
+                {review.preference_memory.map((item) => (
+                  <Text key={item} style={styles.summary}>
+                    • {item}
                   </Text>
-                </View>
-              ) : null}
-              <View style={styles.quickPickRow}>
-                <Pressable style={styles.quickPickBtn} disabled={loading || poiLoading} onPress={() => handleQuickRecommend("food")}>
-                  <Text style={styles.quickPickText}>推荐美食</Text>
-                </Pressable>
-                <Pressable style={styles.quickPickBtn} disabled={loading || poiLoading} onPress={() => handleQuickRecommend("hotel")}>
-                  <Text style={styles.quickPickText}>推荐酒店</Text>
-                </Pressable>
+                ))}
+                <Text style={styles.panelTitle}>下次建议</Text>
+                {review.next_trip_suggestions.map((item) => (
+                  <Text key={item} style={styles.summary}>
+                    • {item}
+                  </Text>
+                ))}
               </View>
-              <MapTopologyBoard
-                itinerary={itinerary}
-                city={structured.destination}
-                startDate={itinerary.intent.start_date ?? structured.startDate}
-                onUpdateNode={async (itemId, payload) => {
-                  const item = itinerary.items.find((entry) => entry.id === itemId);
-                  const instruction = item
-                    ? `用户拖动了「${item.title}」的地图位置，请检查地点描述与后续交通时间是否需要联动调整。`
-                    : undefined;
-                  await handleSmartUpdateNode(itemId, payload, instruction, { silent: true });
-                }}
-                onEditItem={handleEditNode}
-                onMapInteractionChange={handleMapInteraction}
-              />
-              <ItineraryTimeline
-                items={itinerary.items}
-                startDate={itinerary.intent.start_date ?? structured.startDate}
-                busy={nodeSaving || poiLoading}
-                onEdit={handleEditNode}
-                onRecommendPOI={handleRecommendFromItem}
-                onMoveUp={(itemId) => handleMoveNode(itemId, "up")}
-                onMoveDown={(itemId) => handleMoveNode(itemId, "down")}
-                onDelete={(itemId) => {
-                  const item = itinerary.items.find((entry) => entry.id === itemId);
-                  if (!item) return;
-                  Alert.alert("确认删除", `确定删除「${item.title}」？`, [
-                    { text: "取消", style: "cancel" },
-                    {
-                      text: "删除",
-                      style: "destructive",
-                      onPress: async () => {
-                        setNodeSaving(true);
-                        try {
-                          const response = await deleteNode(itinerary.id, itemId);
-                          if (response.itinerary) await applyItineraryUpdate(response.itinerary);
-                          Alert.alert("已删除", response.change_summary || "节点已删除。");
-                        } catch (error) {
-                          Alert.alert("删除失败", error instanceof Error ? error.message : "请稍后重试");
-                        } finally {
-                          setNodeSaving(false);
-                        }
-                      },
-                    },
-                  ]);
-                }}
-              />
-              <NodeEditModal
-                visible={nodeEditDraft != null}
-                draft={nodeEditDraft}
-                dateLabel={
-                  nodeEditDraft
-                    ? formatItemDateLabel(
-                        itinerary.intent.start_date ?? structured.startDate,
-                        itinerary.items.find((item) => item.id === nodeEditDraft.id)?.day ?? 1,
-                      )
-                    : undefined
-                }
-                saving={nodeSaving}
-                onChange={setNodeEditDraft}
-                onClose={() => setNodeEditDraft(null)}
-                onSave={handleSaveNodeEdit}
-                onDelete={handleDeleteNodeEdit}
-              />
-              <OptionPickerModal
-                visible={poiPickerVisible}
-                title={poiPickerTitle}
-                summary={poiSummary}
-                recommendation={poiRecommendation}
-                candidates={poiCandidates}
-                loading={poiLoading}
-                onClose={() => {
-                  setPoiPickerVisible(false);
-                  setPoiContext(null);
-                }}
-                onConfirm={handleConfirmPOI}
-              />
-            </View>
-          ) : null}
-        </View>
-      </View>
-    </ScrollView>
-  );
-}
-
-function TopologySummary({ itinerary }: { itinerary: Itinerary }) {
-  const stats = topologyStats(itinerary);
-  const chips = [
-    { label: "硬锚点", value: `${stats.hard}`, tone: "blue" },
-    { label: "半硬锚点", value: `${stats.semi}`, tone: "cyan" },
-    { label: "软任务", value: `${stats.soft}`, tone: "soft" },
-    { label: "风险", value: `${stats.risks}`, tone: stats.risks ? "warn" : "soft" },
-  ];
-  return (
-    <View style={styles.topologySummary}>
-      <Text style={styles.topologyTitle} numberOfLines={2}>{itinerary.title}</Text>
-      <Text style={styles.topologyCopy} numberOfLines={3}>{itinerary.summary || itinerary.explanation}</Text>
-      <View style={styles.topologyChips}>
-        {chips.map((chip) => (
-          <View key={chip.label} style={[styles.topologyChip, chip.tone === "warn" && styles.topologyChipWarn]}>
-            <Text style={styles.topologyChipValue}>{chip.value}</Text>
-            <Text style={styles.topologyChipLabel}>{chip.label}</Text>
+            ) : null}
           </View>
-        ))}
-      </View>
+        ) : null}
+      </BlueMapShell>
+
+      {topologyItinerary ? (
+        <NodeEditModal
+          visible={nodeEditDraft != null}
+          mode={nodeEditMode}
+          draft={nodeEditDraft}
+          itemCategory={
+            nodeEditMode === "edit" && nodeEditDraft
+              ? topologyItinerary.items.find((item) => item.id === nodeEditDraft.id)?.category
+              : nodeEditDraft?.category
+          }
+          dateLabel={
+            nodeEditDraft
+              ? formatItemDateLabel(
+                  startDateIso,
+                  nodeEditDraft.day ??
+                    topologyItinerary.items.find((item) => item.id === nodeEditDraft.id)?.day ??
+                    1,
+                )
+              : undefined
+          }
+          saving={nodeSaving}
+          onChange={setNodeEditDraft}
+          onClose={() => {
+            setNodeEditDraft(null);
+            setNodeAddAfterId(null);
+          }}
+          onSave={handleSaveNodeEdit}
+          onDelete={nodeEditMode === "edit" ? handleDeleteNodeEdit : undefined}
+          onNavigate={nodeEditMode === "edit" ? handleNavigateFromEdit : undefined}
+          onPickFood={
+            nodeEditMode === "edit" && nodeEditDraft
+              ? () => {
+                  const item = topologyItinerary.items.find((entry) => entry.id === nodeEditDraft.id);
+                  if (item) handleRecommendFromItem(item);
+                }
+              : undefined
+          }
+          onPickHotel={
+            nodeEditMode === "edit" && nodeEditDraft
+              ? () => {
+                  const item = topologyItinerary.items.find((entry) => entry.id === nodeEditDraft.id);
+                  if (item) handleRecommendFromItem({ ...item, category: "hotel" });
+                }
+              : undefined
+          }
+          onPickSight={
+            nodeEditMode === "edit" && nodeEditDraft
+              ? () => {
+                  const item = topologyItinerary.items.find((entry) => entry.id === nodeEditDraft.id);
+                  if (item) handleRecommendFromItem({ ...item, category: "sight" });
+                }
+              : undefined
+          }
+          onAddAfter={
+            nodeEditMode === "edit" && nodeEditDraft
+              ? () => {
+                  const item = topologyItinerary.items.find((entry) => entry.id === nodeEditDraft.id);
+                  if (item) {
+                    setNodeEditDraft(null);
+                    handleAddAfterItem(item);
+                  }
+                }
+              : undefined
+          }
+        />
+      ) : null}
+
+      <OptionPickerModal
+        visible={poiPickerVisible}
+        title={poiPickerTitle}
+        summary={poiSummary}
+        recommendation={poiRecommendation}
+        candidates={poiCandidates}
+        loading={poiLoading}
+        category={poiContext?.category}
+        city={itinerary?.intent.destination || structured.destination}
+        onClose={() => {
+          setPoiPickerVisible(false);
+          setPoiContext(null);
+        }}
+        onConfirm={handleConfirmPOI}
+      />
+
+      <PermissionPrimerModal
+        visible={permissionPrimerVisible}
+        onConfirm={handlePermissionPrimerConfirm}
+        onCancel={() => {
+          setPermissionPrimerVisible(false);
+          setPendingExecute(false);
+        }}
+      />
+
+      <ExpenseStatsModal
+        visible={expenseStatsVisible}
+        quote={priceQuote}
+        lines={expenseLines}
+        onChange={setExpenseLines}
+        onClose={() => setExpenseStatsVisible(false)}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1, backgroundColor: "#D9F2FF" },
-  pageContent: { alignItems: "center", paddingBottom: 32 },
-  phoneFrame: { width: Math.min(screenWidth, 390), padding: 7, backgroundColor: "#8E67FF" },
-  homeCard: { minHeight: "100%", padding: 18, paddingTop: 34, borderRadius: 34, overflow: "hidden", backgroundColor: "#E8F7FF" },
-  bgOrbLeft: { position: "absolute", left: 24, top: -36, width: 180, height: 180, borderRadius: 90, backgroundColor: "rgba(173,216,255,0.75)" },
-  bgOrbRight: { position: "absolute", right: -60, top: 40, width: 160, height: 160, borderRadius: 80, backgroundColor: "rgba(255,255,255,0.64)" },
-  pageHead: { flexDirection: "row", alignItems: "center", gap: 12 },
-  backBtn: { width: 31, height: 31, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(255,255,255,0.86)" },
-  backText: { marginTop: -4, color: "#4C84FF", fontSize: 28 },
-  titleBlock: { flex: 1, minWidth: 0 },
-  titleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  heading: { color: "#233B63", fontSize: 16, fontWeight: "900" },
-  titleBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, overflow: "hidden", color: "#4383FF", backgroundColor: "rgba(211,230,255,0.9)", fontSize: 10, fontWeight: "800" },
-  subheading: { marginTop: 7, color: "#7F93B1", fontSize: 11, fontWeight: "700" },
-  stageTabs: { gap: 8, paddingVertical: 14 },
-  stageTab: { width: 112, padding: 10, borderRadius: 16, backgroundColor: "rgba(255,255,255,0.62)" },
-  stageTabActive: { backgroundColor: "#FFFFFF" },
-  stageIndex: { width: 22, height: 22, borderRadius: 11, overflow: "hidden", textAlign: "center", textAlignVertical: "center", color: "#93A3BA", backgroundColor: "#EEF6FF", fontWeight: "900" },
-  stageIndexActive: { color: "#FFFFFF", backgroundColor: "#287CFF" },
-  stageTitle: { marginTop: 7, color: "#527099", fontSize: 11, fontWeight: "900" },
-  stageTitleActive: { color: "#287CFF" },
-  stageSub: { marginTop: 3, color: "#8BA0BD", fontSize: 9, fontWeight: "800" },
-  flowRail: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 12 },
-  flowStep: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.76)",
+  page: { flex: 1, backgroundColor: theme.colors.bgSky },
+  shellContentDark: {
+    paddingHorizontal: 0,
+    paddingTop: 0,
+    paddingBottom: 0,
   },
-  flowIndex: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    overflow: "hidden",
-    textAlign: "center",
-    textAlignVertical: "center",
-    color: "#FFFFFF",
-    backgroundColor: "#287CFF",
-    fontSize: 9,
-    fontWeight: "900",
-  },
-  flowText: { color: "#527099", fontSize: 9, fontWeight: "900" },
-  section: { marginTop: 12, padding: 12, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.9)" },
+  section: { marginTop: 4, gap: 10 },
   sectionTitle: { color: "#233B63", fontSize: 14, fontWeight: "900", marginBottom: 10 },
   cta: { minHeight: 48, marginTop: 14, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: "#1B63FF" },
   ctaText: { color: "#FFFFFF", fontSize: 14, fontWeight: "900" },

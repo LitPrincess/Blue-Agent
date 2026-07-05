@@ -79,6 +79,18 @@ export function startDeviceSpeech(
 
 export function normalizeSpeechError(message: string) {
   const lower = message.toLowerCase();
+  if (lower.includes("超时") || lower.includes("timeout") || lower.includes("abort")) {
+    return "无法连接后端（请求超时）。常见原因：电脑换了 Wi‑Fi/IP，但 apps/mobile/.env 里的 EXPO_PUBLIC_API_BASE_URL 还是旧地址。请改成与 Expo 二维码同一网段的 IP（如 Metro 显示的 10.x.x.x），保存后重启 Expo。";
+  }
+  if (
+    lower.includes("connectexception") ||
+    lower.includes("failed to connect") ||
+    lower.includes("fetch failed") ||
+    lower.includes("network request failed") ||
+    lower.includes("econnrefused")
+  ) {
+    return "无法连接后端 API。请确认电脑已运行 npm run dev:api，且 apps/mobile/.env 中 EXPO_PUBLIC_API_BASE_URL 为本机局域网 IP，修改后需重启 Expo。";
+  }
   if (lower.includes("quota exceeded") || lower.includes("free allocated quota")) {
     return "阿里云语音免费额度已用完。请确认已配置百度 ASR，或改用文字输入。";
   }
