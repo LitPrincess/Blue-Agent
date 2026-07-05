@@ -96,6 +96,12 @@ import { BluemapTheme as theme } from "../theme/bluemapTheme";
 const samplePrompt = "";
 
 type Stage = "input" | "analyze" | "compare" | "compareDetail" | "order" | "guardian" | "review" | "widget";
+const ADD_NODE_CATEGORIES = ["food", "sight", "hotel", "free"] as const;
+type AddNodeCategory = (typeof ADD_NODE_CATEGORIES)[number];
+
+function normalizeAddNodeCategory(category: NodeEditDraft["category"]): AddNodeCategory {
+  return ADD_NODE_CATEGORIES.includes(category as AddNodeCategory) ? (category as AddNodeCategory) : "free";
+}
 
 function stageToTab(stage: Stage): MainTab {
   if (stage === "input" || stage === "analyze") return 0;
@@ -915,7 +921,7 @@ export function TravelDirectorScreen() {
           end_time: suggestEndTime(nodeEditDraft.start_time.trim()),
           title: nodeEditDraft.title.trim() || undefined,
           location: nodeEditDraft.location.trim() || undefined,
-          category: nodeEditDraft.category ?? "free",
+          category: normalizeAddNodeCategory(nodeEditDraft.category),
           insert_after_item_id: nodeAddAfterId ?? undefined,
           instruction: "请联动调整相邻节点的时间、交通缓冲与地点描述。",
         });
